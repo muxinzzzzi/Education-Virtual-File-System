@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+cmake-build*/
+*.o
+*.a
+*.so
+*.dylib
+*.out
+*.log
+*.tmp
+*.swp
+*.swo
+
+# CMake-generated files
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# Executables / test binaries
+test_vfs
+simple_test
+debug_test
+test_one_by_one
+/tmp/vfs_quick_test*
+
+# OS / editor junk
+.DS_Store
+*.dSYM
+
