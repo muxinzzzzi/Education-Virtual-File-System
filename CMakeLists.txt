@@ -1,18 +1,39 @@
 cmake_minimum_required(VERSION 3.16)
-project(os_vfs CXX)
+project(ReviewSystem VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(vfs STATIC
-  vfs/src/mem_block_device.cc
-  vfs/src/vfs.cc
+# Build options
+option(BUILD_TESTS "Build test suite" ON)
+option(BUILD_GUI "Build GUI application" ON)
+
+# Find required packages
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+
+# Include directories
+include_directories(
+    ${CMAKE_SOURCE_DIR}/include
 )
 
-target_include_directories(vfs PUBLIC vfs/include)
+# Compiler flags
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
-add_executable(test_vfs
-  vfs/tests/test_vfs.cc
-)
+# Add subdirectories
+add_subdirectory(src/filesystem)
+add_subdirectory(src/common)
+add_subdirectory(src/server)
+add_subdirectory(src/client)
 
-target_link_libraries(test_vfs PRIVATE vfs)
+if(BUILD_GUI)
+    add_subdirectory(src/gui)
+endif()
+
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(src/tests)
+endif()

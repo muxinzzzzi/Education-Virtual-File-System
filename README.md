@@ -1,237 +1,150 @@
-# VFS (虚拟文件系统) - 模块 A
+# Peer Review System
 
-## 项目简介
+完整的科研审稿系统，使用 C++ 实现，包含自定义文件系统、Client-Server 架构和多角色权限管理。
 
-这是一个完整实现的虚拟文件系统（VFS），支持操作系统实训课程要求的所有核心功能。
+## 系统架构
 
-## 已实现功能
+### 核心组件
 
-### 1. 磁盘布局与持久化 ✅
-- **SuperBlock**: 包含文件系统元数据（magic, version, 布局信息）
-- **Inode Table**: 固定大小 128 字节，支持文件和目录
-- **Free Bitmap**: 管理数据块的分配与释放
-- **Data Blocks**: 支持直接块（10个）+ 一级间接块
+1. **虚拟文件系统 (VFS)**
+   -自定义文件系统，包含 superblock、inode、bitmap
+   - LRU 缓存，提升性能
+   - 完整的文件与目录操作
+   - 备份与恢复功能
 
-### 2. 目录与路径管理 ✅
-- **多级目录**: 支持任意深度的目录树
-- **路径解析**: 自动处理绝对路径，规范化多重斜杠
-- **Mkdir/Rmdir**: 创建和删除目录（仅空目录可删）
-- **Lookup**: 高效的路径查找，支持父目录定位
+2. **网络服务器**
+   - 基于 TCP/IP 的多线程服务器
+   - 用户认证与授权
+   - 四种用户角色：作者、审稿人、编辑、管理员
+   - 完整的审稿业务逻辑
 
-### 3. 文件读写 ✅
-- **Create/Unlink**: 创建和删除文件
-- **ReadFile/WriteFile**: 按偏移量读写，支持自动扩展
-- **Truncate**: 可选功能，支持文件截断和扩展
-- **大文件支持**: 通过间接块支持超过 40KB 的文件
-- **稀疏文件**: 支持跨块写入，自动填充零
+3. **CLI 客户端**
+   - 交互式命令行界面
+   - 基于角色的功能菜单
+   - 文件上传下载
+   - 状态查看
 
-### 4. Server API 接口 ✅
-统一的 VFS API 对外提供：
-- `Vfs::Mkfs(dev)` - 格式化文件系统
-- `Vfs::Mount(dev)` - 挂载文件系统
-- `Mkdir/Rmdir/ListDir` - 目录操作
-- `CreateFile/Unlink` - 文件操作  
-- `ReadFile/WriteFile` - 读写操作
-- `Truncate` - 可选操作
+## 编译与运行
 
-### 5. 线程安全 ✅
-所有公共接口内部加锁，保证并发安全。
+### 环境要求
 
-### 6. 错误处理 ✅
-返回标准错误码：
-- `VFS_EPERM` (-1): 无权限
-- `VFS_ENOENT` (-2): 路径不存在
-- `VFS_EEXIST` (-3): 已存在
-- `VFS_ENOTDIR` (-4): 期望目录但不是
-- `VFS_EISDIR` (-5): 是目录但期望文件
-- `VFS_ENOTEMPTY` (-6): 目录非空
-- `VFS_EINVAL` (-7): 参数或路径非法
-- `VFS_ENOSPC` (-8): 空间不足
-- `VFS_EIO` (-9): I/O 错误
+- **操作系统**: macOS 或 Linux
+- **编译器**: 支持 C++17 的 Clang 或 GCC
+- **构建工具**: CMake 3.16+
+- **依赖库**: OpenSSL, Threads, Boost.Asio (如有使用), Qt 6 (GUI)
 
-## 项目结构
-
-```
-OS_work/
-├── vfs/
-│   ├── include/
-│   │   ├── block_device.h    # 块设备抽象接口
-│   │   └── vfs.h              # VFS 公共接口
-│   ├── src/
-│   │   ├── mem_block_device.cc  # 内存块设备实现（测试用）
-│   │   └── vfs.cc               # VFS 核心实现（~770行）
-│   └── tests/
-│       └── test_vfs.cc        # 12个单元测试
-├── docs/
-│   ├── INTERFACES.md          # 接口规范（Day1冻结）
-│   ├── PROTOCOL.md            # 客户端-服务器协议
-│   ├── FS_LAYOUT.md           # 文件系统布局详细说明
-│   └── REQUIREMENTS.md        # 项目需求
-├── build/                     # 编译输出目录
-│   ├── libvfs.a              # VFS 静态库
-│   └── test_vfs              # 测试可执行文件
-├── CMakeLists.txt            # CMake 构建配置
-└── README.md                 # 本文档
-```
-
-## 编译与测试
-
-### 1. 编译项目
+### 快速编译
 
 ```bash
-cd /Users/muxin/Desktop/OS_work
-mkdir -p build
-cd build
+# 1. 创建并进入构建目录
+mkdir -p build && cd build
+
+# 2. 配置项目 (默认不包含 GUI，如需 GUI 请添加 -DBUILD_GUI=ON)
 cmake ..
-make
+
+# 3. 编译所有组件
+make -j$(sysctl -n hw.ncpu || nproc)
 ```
 
-编译成功后会生成：
-- `libvfs.a` - VFS 静态库
-- `test_vfs` - 测试程序
+### 运行指令
 
-### 2. 运行测试
+#### 1. 启动服务器 (必须首先运行)
 
-**方式一：运行完整测试套件**
+服务器负责管理 VFS 镜像和处理所有业务逻辑。
+
 ```bash
-cd /Users/muxin/Desktop/OS_work/build
-./test_vfs
+# 格式: ./src/server/review_server [端口] [VFS镜像路径]
+cd build
+./src/server/review_server 8080 review_system.img
 ```
 
-测试包含 12 个测试用例：
-1. ✅ Mkfs 和 Mount 基本功能
-2. ✅ Mkdir 和 ListDir
-3. ✅ 嵌套目录创建
-4. ✅ 文件创建和删除
-5. ✅ 小文件读写
-6. ✅ 大文件多块读写
-7. ✅ 目录删除（空/非空）
-8. ✅ 路径查找错误处理
-9. ✅ Truncate 文件截断
-10. ✅ 批量文件创建（bitmap分配）
-11. ✅ 大文件使用间接块
-12. ✅ 稀疏文件写入
+#### 2. 启动 CLI 客户端
 
-**方式二：单独测试某个功能**
+在另一个终端中运行客户端进行交互。
 
-创建自己的测试文件：
-```cpp
-#include "vfs.h"
-#include "block_device.h"
-#include <iostream>
-
-int main() {
-  auto dev = MakeMemBlockDevice(1024, 4096);
-  Vfs::Mkfs(dev);
-  auto vfs = Vfs::Mount(dev);
-  
-  vfs->Mkdir("/papers");
-  vfs->CreateFile("/papers/test.txt");
-  vfs->WriteFile("/papers/test.txt", 0, "Hello VFS!");
-  
-  std::string content;
-  vfs->ReadFile("/papers/test.txt", 0, 100, &content);
-  std::cout << "Read: " << content << "\n";
-  
-  return 0;
-}
-```
-
-编译运行：
 ```bash
-g++ -std=c++17 -I vfs/include my_test.cc build/libvfs.a vfs/src/mem_block_device.cc -o my_test
-./my_test
+# 格式: ./src/client/review_client [服务器IP] [端口]
+cd build
+./src/client/review_client 127.0.0.1 8080
+```
+#### 3. 启动 GUI 客户端
+未完成完，运行需要先下载 Qt 6
+
+```bash
+./run_gui.sh
 ```
 
-### 3. 集成到 Server 端
+---
 
-在 Server 代码中引入 VFS：
+## 详细测试流程 (CLI 示例)
+还有一些其他的功能也能测试
 
-```cpp
-#include "vfs.h"
-#include "block_device.h"
+### 阶段 1: 作者提交论文
+1. 使用 **alice / password** 登录客户端。
+2. 选择 `1. Upload Paper`。
+3. 输入标题（如 `AI Research`）和本地文件路径。
+4. 系统返回 `201 Created` 及 `paper_id=P1`。
+5. 选择 `3. Logout`。
 
-// 初始化
-auto dev = MakeMemBlockDevice(8192, 4096); // 32MB 虚拟磁盘
-Vfs::Mkfs(dev);
-auto vfs = Vfs::Mount(dev);
+### 阶段 2: 编辑分配审稿人
+1. 使用 **charlie / password** 登录客户端。
+2. 选择 `1. Assign Reviewer`。
+3. 输入 Paper ID: `P1`，审稿人用户名: `bob`。
+4. 选择 `3. Logout`。
 
-// 使用示例
-vfs->Mkdir("/papers");
-vfs->CreateFile("/papers/paper_123/v1.pdf");
-vfs->WriteFile("/papers/paper_123/v1.pdf", 0, pdf_data);
+### 阶段 3: 审稿人评审
+1. 使用 **bob / password** 登录客户端。
+2. 选择 `1. Download Paper`。输入 `P1` 和本地保存路径。
+3. 选择 `2. Submit Review`。输入 `P1` 和包含意见的本地文件路径。
+4. 选择 `3. Logout`。
 
-std::vector<std::string> papers;
-vfs->ListDir("/papers", &papers);
-```
+### 阶段 4: 编辑做出决定
+1. 使用 **charlie / password** 登录。
+2. 选择 `2. Make Decision`。
+3. 输入 `P1`，决定输入 `accept`。
+4. 系统更新论文状态。
 
-## 技术细节
+### 阶段 5: 管理员维护
+1. 使用 **admin / admin123** 登录。
+2. 选择 `2. View System Status` 查看 VFS 运行统计。
+3. 选择 `3. Create Backup` 输入备份名 `stable_v1`。
+4. 系统将在 VFS 内部创建磁盘快照。
 
-### 磁盘布局
-```
-Block 0:          SuperBlock
-Block 1..N:       Free Bitmap  
-Block N+1..M:     Inode Table (1024 个 inode)
-Block M+1..End:   Data Blocks
-```
+## 用户角色与功能
 
-### Inode 结构（128字节）
-- mode (2B): 0=空闲, 1=文件, 2=目录
-- links (2B): 链接计数
-- size (8B): 文件/目录大小（字节）
-- direct[10] (40B): 10个直接块指针
-- indirect1 (4B): 一级间接块指针
-- indirect2 (4B): 预留（未使用）
-- reserved (68B): 对齐填充
+### 默认测试账户
 
-### 目录项结构（64字节）
-- inode (4B): inode号，0表示空洞
-- name[60]: 文件/目录名，以'\0'结尾
+- **管理员**: admin / admin123
+- **作者**: alice / password
+- **审稿人**: bob / password
+- **编辑**: charlie / password
 
-### 块分配策略
-- 首次适配（First-fit）：从 bitmap 中找到第一个空闲块
-- 新分配块自动清零
-- 释放时清除 bitmap 对应位
+### 功能列表
 
-## 性能特点
+- **作者**: 上传论文、提交修订版本、查看审稿状态、下载审稿意见
+- **审稿人**: 下载论文、上传评审意见、查看审稿状态
+- **编辑**: 分配审稿人、查看审稿状态、作出最终决定
+- **管理员**: 用户管理、备份管理、系统状态查看
 
-- ✅ 支持文件大小：最大 ~4MB（10个直接块 + 1024个间接块）
-- ✅ 支持 inode 数量：1024 个（可配置）
-- ✅ 块大小：4096 字节（标准页大小）
-- ✅ 线程安全：全局互斥锁
-- ✅ 写策略：写透（write-through）
+## 要添加的功能
 
-## 下一步工作
+- **现有功能检查**
+   - **可能有问题**: 三个查看审稿状态应该做区分, 比如审稿人的查看审稿状态应该是能看到分配给自己的文章，然后再输入ID查看。
 
-根据项目要求，模块 A (VFS) 已完成。接下来需要：
+- **审稿业务逻辑完善**
+    - **多轮审稿轮次管理**（Round 1 / Round 2 / Rebuttal）
+    - **审稿意见匿名化策略**（Single-blind / Double-blind）
+    - **最终决定状态细分**（Accept / Minor / Major / Reject）
 
-1. **模块 B (Server/Protocol)**
-   - 实现 TCP 服务器
-   - 实现 JSON 协议解析
-   - 连接 VFS API
-   - 实现用户认证和权限管理
-   - 实现四种角色（author/reviewer/editor/admin）
+- **自动化与智能化分配**
+    - **Conflict of Interest (COI) 检测**
+    - **基于关键词/领域的自动审稿人推荐**
+    - **负载均衡（避免某个审稿人任务过多）**
 
-2. **模块 C (Client CLI)**
-   - 实现交互式命令行界面
-   - 实现文件上传/下载
-   - 实现分块传输
+- **高级文件系统特性**
+    - **日志型文件系统（Journaling）**
+    - **Copy-on-Write 通过文快照**实现系统备份
+    - **崩溃恢复一致性证明**
+    - **磁盘块校验（checksum）**
 
-3. **备份功能**
-   - 实现设备快照
-   - 实现备份列表管理
-   - 实现恢复功能
-
-## 参考文档
-
-详细设计见 `docs/` 目录：
-- `INTERFACES.md` - 接口定义和错误码
-- `FS_LAYOUT.md` - 磁盘布局和数据结构
-- `PROTOCOL.md` - 网络协议规范
-- `REQUIREMENTS.md` - 项目需求清单
-
-## 作者
-
-模块 A 负责人：成员 1
-完成时间：2025-12-26
-
+- **GUI 客户端**
