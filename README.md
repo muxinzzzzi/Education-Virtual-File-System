@@ -131,20 +131,19 @@ cd build
 - **现有功能检查**
    - **可能有问题**: 三个查看审稿状态应该做区分, 比如审稿人的查看审稿状态应该是能看到分配给自己的文章，然后再输入ID查看。
 
-- **审稿业务逻辑完善**
-    - **多轮审稿轮次管理**（Round 1 / Round 2 / Rebuttal）
-    - **审稿意见匿名化策略**（Single-blind / Double-blind）
-    - **最终决定状态细分**（Accept / Minor / Major / Reject）
+- **审稿业务逻辑完善（已实现）**
+   - **多轮审稿轮次管理**：Round1/ Round2/ Rebuttal，提交修订会推进轮次，决策为 Major/Minor 时进入 Rebuttal。
+   - **审稿意见匿名化策略**：上传/分配时可选 `single` 或 `double`，作者侧下载评审/查看状态时自动隐藏审稿人身份。
+   - **最终决定状态细分**：Accept / Minor / Major / Reject，状态写入 `status.json` 并在查看状态时展示。
 
 - **自动化与智能化分配**
     - **Conflict of Interest (COI) 检测**
     - **基于关键词/领域的自动审稿人推荐**
     - **负载均衡（避免某个审稿人任务过多）**
 
-- **高级文件系统特性**
-    - **日志型文件系统（Journaling）**
-    - **Copy-on-Write 通过文快照**实现系统备份
-    - **崩溃恢复一致性证明**
-    - **磁盘块校验（checksum）**
+- **高级文件系统特性（已实现基础版）**
+   - **日志型文件系统（Journaling）**：写前日志自动重放，`SYSTEM_STATUS` 展示重放统计。
+   - **Copy-on-Write 快照备份**：管理员 `Create Backup` 生成 COW 快照，`List Backups`/`Restore Backup` 使用差分文件回滚。
+   - **崩溃恢复与校验**：块级 checksum 保存到 `.checksum`，读时校验并告警。
 
 - **GUI 客户端**

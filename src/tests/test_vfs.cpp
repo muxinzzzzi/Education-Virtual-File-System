@@ -2,7 +2,7 @@
 #include <cassert>
 #include <fcntl.h>
 #include <iostream>
-
+#include <cstring>  
 using namespace vfs;
 
 void test_format_and_mount() {

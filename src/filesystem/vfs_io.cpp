@@ -1,7 +1,7 @@
 #include "filesystem/vfs.h"
 #include <fcntl.h>
 #include <unistd.h>
-
+#include <cstring>
 namespace vfs {
 
 int VirtualFileSystem::open(const std::string &path, int flags) {

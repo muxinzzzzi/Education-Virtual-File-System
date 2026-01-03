@@ -301,6 +301,11 @@ void ReviewClient::upload_paper() {
   std::cout << "Paper file path: ";
   std::string file_path = read_line();
 
+  std::cout << "Blind strategy (single/double) [single]: ";
+  std::string blind = read_line();
+  if (blind.empty())
+    blind = "single";
+
   auto file_data = read_file(file_path);
   if (file_data.empty()) {
     std::cerr << "Failed to read file\n";
@@ -310,6 +315,7 @@ void ReviewClient::upload_paper() {
   protocol::Message msg;
   msg.command = protocol::Command::UPLOAD_PAPER;
   msg.params["title"] = title;
+  msg.params["blind"] = blind;
   msg.body = file_data;
 
   if (!send_message(msg)) {
@@ -376,6 +382,9 @@ void ReviewClient::submit_review() {
   std::cout << "Paper ID: ";
   std::string paper_id = read_line();
 
+  std::cout << "Round (R1/R2/REBUTTAL, optional): ";
+  std::string round = read_line();
+
   std::cout << "Review file path: ";
   std::string review_path = read_line();
 
@@ -384,6 +393,9 @@ void ReviewClient::submit_review() {
   protocol::Message msg;
   msg.command = protocol::Command::SUBMIT_REVIEW;
   msg.params["paper_id"] = paper_id;
+  if (!round.empty()) {
+    msg.params["round"] = round;
+  }
   msg.body = review_data;
 
   send_message(msg);
@@ -401,10 +413,22 @@ void ReviewClient::assign_reviewer() {
   std::cout << "Reviewer username: ";
   std::string reviewer = read_line();
 
+  std::cout << "Round (R1/R2/REBUTTAL, optional): ";
+  std::string round = read_line();
+
+  std::cout << "Blind strategy (single/double) [leave empty to keep]: ";
+  std::string blind = read_line();
+
   protocol::Message msg;
   msg.command = protocol::Command::ASSIGN_REVIEWER;
   msg.params["paper_id"] = paper_id;
   msg.params["reviewer"] = reviewer;
+  if (!round.empty()) {
+    msg.params["round"] = round;
+  }
+  if (!blind.empty()) {
+    msg.params["blind"] = blind;
+  }
 
   send_message(msg);
 
@@ -514,9 +538,15 @@ void ReviewClient::download_reviews() {
   std::cout << "Paper ID: ";
   std::string paper_id = read_line();
 
+  std::cout << "Round (R1/R2/REBUTTAL, optional): ";
+  std::string round = read_line();
+
   protocol::Message msg;
   msg.command = protocol::Command::DOWNLOAD_REVIEWS;
   msg.params["paper_id"] = paper_id;
+  if (!round.empty()) {
+    msg.params["round"] = round;
+  }
 
   send_message(msg);
   protocol::Response resp;

@@ -5,6 +5,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 namespace protocol {
 
@@ -78,6 +79,12 @@ enum class LifecycleState {
   REJECTED
 };
 
+// Review round
+enum class ReviewRound { ROUND1, ROUND2, REBUTTAL };
+
+// Blind strategy
+enum class BlindPolicy { SINGLE_BLIND, DOUBLE_BLIND };
+
 // Message structure
 struct Message {
   Command command;
@@ -124,6 +131,12 @@ public:
 
   static std::string state_to_string(LifecycleState state);
   static LifecycleState string_to_state(const std::string &str);
+
+  static std::string round_to_string(ReviewRound round);
+  static ReviewRound string_to_round(const std::string &str);
+
+  static std::string blind_to_string(BlindPolicy blind);
+  static BlindPolicy string_to_blind(const std::string &str);
 };
 
 // Command string mapping
@@ -328,6 +341,45 @@ inline LifecycleState Protocol::string_to_state(const std::string &str) {
   if (str == "REJECTED")
     return LifecycleState::REJECTED;
   return LifecycleState::SUBMITTED;
+}
+
+inline std::string Protocol::round_to_string(ReviewRound round) {
+  switch (round) {
+  case ReviewRound::ROUND1:
+    return "R1";
+  case ReviewRound::ROUND2:
+    return "R2";
+  case ReviewRound::REBUTTAL:
+    return "REBUTTAL";
+  default:
+    return "R1";
+  }
+}
+
+inline ReviewRound Protocol::string_to_round(const std::string &str) {
+  if (str == "R1")
+    return ReviewRound::ROUND1;
+  if (str == "R2")
+    return ReviewRound::ROUND2;
+  if (str == "REBUTTAL")
+    return ReviewRound::REBUTTAL;
+  return ReviewRound::ROUND1;
+}
+
+inline std::string Protocol::blind_to_string(BlindPolicy blind) {
+  switch (blind) {
+  case BlindPolicy::DOUBLE_BLIND:
+    return "double";
+  case BlindPolicy::SINGLE_BLIND:
+  default:
+    return "single";
+  }
+}
+
+inline BlindPolicy Protocol::string_to_blind(const std::string &str) {
+  if (str == "double")
+    return BlindPolicy::DOUBLE_BLIND;
+  return BlindPolicy::SINGLE_BLIND;
 }
 
 } // namespace protocol

@@ -9,6 +9,8 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <map>
 #include <vector>
 
 namespace vfs {
@@ -169,6 +171,21 @@ public:
    */
   bool restore_backup(const std::string &backup_name);
 
+  /**
+   * @brief Create a copy-on-write snapshot
+   */
+  bool create_snapshot(const std::string &name);
+
+  /**
+   * @brief List copy-on-write snapshots
+   */
+  std::vector<std::string> list_snapshots();
+
+  /**
+   * @brief Restore a snapshot and remove it
+   */
+  bool restore_snapshot(const std::string &name);
+
   // ===== Statistics =====
 
   /**
@@ -181,16 +198,40 @@ public:
    */
   CacheStats get_cache_stats() const;
 
+  struct JournalStats {
+    uint64_t replayed{0};
+    uint64_t pending{0};
+    bool recovered{false};
+    bool dirty{false};
+  };
+
+  /**
+   * @brief Get journaling statistics
+   */
+  JournalStats get_journal_stats() const;
+
 private:
   // File system state
   bool mounted_;
   std::string image_path_;
   std::fstream image_file_;
+  std::string journal_path_;
+  std::string checksum_path_;
 
   // Core structures
   Superblock superblock_;
   std::unique_ptr<Bitmap> bitmap_;
   std::unique_ptr<LRUCache> cache_;
+  std::vector<uint32_t> block_checksums_;
+  JournalStats journal_stats_;
+
+  struct SnapshotMeta {
+    std::string name;
+    std::string diff_path;
+    std::string index_path;
+    std::unordered_set<uint32_t> blocks;
+  };
+  std::map<std::string, SnapshotMeta> snapshots_;
 
   // File descriptors
   std::unordered_map<int, FileDescriptor> fd_table_;
@@ -228,6 +269,22 @@ private:
   void init_root_directory();
   int allocate_fd();
   void free_fd(int fd);
+
+  // Journaling helpers
+  bool replay_journal();
+  bool append_journal_entry(uint32_t block_num,
+                            const std::vector<char> &data);
+  bool flush_and_clear_journal();
+
+  // Checksums
+  uint32_t calc_checksum(const std::vector<char> &data) const;
+  void load_checksums();
+  void save_checksums();
+
+  // Snapshots (COW)
+  void load_snapshots();
+  bool snapshot_record_block(uint32_t block_num,
+                             const std::vector<char> &original);
 };
 
 } // namespace vfs

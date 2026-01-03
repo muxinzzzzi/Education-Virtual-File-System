@@ -2,12 +2,30 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <set>
 #include <netinet/in.h>
 #include <sstream>
 #include <sys/socket.h>
 #include <unistd.h>
 
 namespace server {
+
+namespace {
+const std::string kDefaultRound =
+    protocol::Protocol::round_to_string(protocol::ReviewRound::ROUND1);
+
+std::string status_file_path(const std::string &paper_dir) {
+  return paper_dir + "/status.json";
+}
+
+std::string rounds_root(const std::string &paper_dir) {
+  return paper_dir + "/rounds";
+}
+
+std::string assignments_file(const std::string &paper_dir) {
+  return paper_dir + "/assignments.txt";
+}
+} // namespace
 
 ReviewServer::ReviewServer(int port, const std::string &fs_image_path)
     : port_(port), fs_image_path_(fs_image_path), server_socket_(-1),
@@ -315,7 +333,9 @@ ReviewServer::handle_upload_paper(const protocol::Message &msg,
 
   std::string paper_dir = "/papers/" + paper_id;
   std::string versions_dir = paper_dir + "/versions";
-  std::string reviews_dir = paper_dir + "/reviews";
+  std::string rounds_dir = rounds_root(paper_dir);
+  std::string r1_dir = round_dir(paper_dir, kDefaultRound);
+  std::string reviews_dir = r1_dir + "/reviews";
   std::string paper_file = versions_dir + "/v1.pdf";
   std::string metadata_file = paper_dir + "/metadata.txt";
 
@@ -330,10 +350,16 @@ ReviewServer::handle_upload_paper(const protocol::Message &msg,
 
   if (!must_ok(vfs_->mkdir(paper_dir), paper_dir) ||
       !must_ok(vfs_->mkdir(versions_dir), versions_dir) ||
+      !must_ok(vfs_->mkdir(rounds_dir), rounds_dir) ||
+      !must_ok(vfs_->mkdir(r1_dir), r1_dir) ||
       !must_ok(vfs_->mkdir(reviews_dir), reviews_dir)) {
     return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
                               "Failed to create paper directories");
   }
+
+  // Initialize status and assignments
+  save_paper_status(paper_dir, PaperStatus());
+  vfs_->create_file(assignments_file(paper_dir), 0644);
 
   // ---- 2. Create and write paper file ----
   int r = vfs_->create_file(paper_file, 0644);
@@ -414,14 +440,17 @@ ReviewServer::handle_upload_paper(const protocol::Message &msg,
   }
 
   // ---- 5. Write initial status ----
-  std::string status_file = paper_dir + "/status.txt";
-  vfs_->create_file(status_file, 0644);
-  fd = vfs_->open(status_file, O_WRONLY | O_TRUNC);
-  if (fd >= 0) {
-    std::string s = "SUBMITTED";
-    vfs_->write(fd, s.data(), s.size());
-    vfs_->close(fd);
+  PaperStatus status;
+  status.current_round = kDefaultRound;
+  status.state = protocol::LifecycleState::SUBMITTED;
+  status.decision = protocol::Decision::PENDING;
+  auto it_blind = msg.params.find("blind");
+  if (it_blind != msg.params.end()) {
+    status.blind = protocol::Protocol::string_to_blind(it_blind->second);
+  } else {
+    status.blind = protocol::BlindPolicy::SINGLE_BLIND;
   }
+  save_paper_status(paper_dir, status);
 
   // ---- 6. Final sanity check ----
   if (!vfs_->exists(metadata_file)) {
@@ -504,24 +533,23 @@ ReviewServer::handle_submit_revision(const protocol::Message &msg,
                               "Failed to write revision data");
   }
 
-  // Update Metadata (Append log)
-  std::string metadata_file = paper_dir + "/metadata.txt";
-  fd = vfs_->open(metadata_file,
-                  O_WRONLY | O_APPEND); // O_APPEND not implemented? VFS doesn't
-                                        // support O_APPEND yet.
+  // Move to next round if applicable
+  PaperStatus status = load_paper_status(paper_dir);
+  if (status.current_round == "R1") {
+    status.current_round = "R2";
+  } else if (status.current_round == "R2") {
+    status.current_round = "REBUTTAL";
+  }
+  status.state = protocol::LifecycleState::SUBMITTED;
+  status.decision = protocol::Decision::PENDING;
 
-  // Since we don't have atomic append or O_APPEND support in VFS yet (based on
-  // previous file read), we might skip updating metadata for now or we would
-  // need to read-modify-write. Given user request simplicity, just persisting
-  // the file is the main "Revision" feature.
-
-  // Optionally, we could try to read and write back if we want to log it.
-  // But let's stick to core requirement: "Submit revised version". The file
-  // v2.pdf etc is there.
+  // Ensure round directories exist for new round
+  ensure_round_dirs(paper_dir, status.current_round);
+  save_paper_status(paper_dir, status);
 
   return protocol::Response(protocol::StatusCode::OK,
                             "Revision v" + std::to_string(new_ver) +
-                                " submitted");
+                                " submitted for next round");
 }
 
 protocol::Response
@@ -540,8 +568,22 @@ ReviewServer::handle_view_paper_status(const protocol::Message &msg,
                               "Paper not found");
   }
 
+  protocol::Role role = session_role(session_id);
+  std::string username = auth_manager_->get_username(session_id);
+  PaperStatus status = load_paper_status(paper_dir);
+  if (role == protocol::Role::REVIEWER &&
+      !is_reviewer_assigned(paper_dir, status.current_round, username)) {
+    return protocol::Response(protocol::StatusCode::FORBIDDEN,
+                              "Paper not assigned to you");
+  }
+
   std::ostringstream oss;
   oss << "=== Paper ID: " << it_paper_id->second << " ===\n";
+  oss << "Round: " << status.current_round << "\n";
+  oss << "Blind: " << protocol::Protocol::blind_to_string(status.blind) << "\n";
+  oss << "State: " << protocol::Protocol::state_to_string(status.state) << "\n";
+  oss << "Decision: "
+      << protocol::Protocol::decision_to_string(status.decision) << "\n\n";
 
   // Read Metadata
   std::string metadata_file = paper_dir + "/metadata.txt";
@@ -571,13 +613,21 @@ ReviewServer::handle_view_paper_status(const protocol::Message &msg,
   }
 
   // List Reviews
-  oss << "\nReviews:\n";
-  std::string reviews_dir = paper_dir + "/reviews";
+  oss << "\nReviews (current round):\n";
+  std::string reviews_dir = round_dir(paper_dir, status.current_round) + "/reviews";
   if (vfs_->readdir(reviews_dir, entries) == 0) {
     bool has_reviews = false;
+    int idx = 1;
     for (const auto &entry : entries) {
       if (entry.inode_num != 0) {
-        oss << " - " << std::string(entry.name, entry.name_len) << "\n";
+        std::string name(entry.name, entry.name_len);
+        if (role == protocol::Role::AUTHOR ||
+            status.blind == protocol::BlindPolicy::DOUBLE_BLIND) {
+          oss << " - Reviewer_" << idx << "\n";
+        } else {
+          oss << " - " << name << "\n";
+        }
+        idx++;
         has_reviews = true;
       }
     }
@@ -601,8 +651,38 @@ ReviewServer::handle_download_paper(const protocol::Message &msg,
                               "Missing paper_id");
   }
 
+  std::string paper_dir = "/papers/" + it_paper_id->second;
+  std::string versions_dir = paper_dir + "/versions";
+
+  // Reviewers must be assigned to access the paper
+  if (session_role(session_id) == protocol::Role::REVIEWER) {
+    auto status = load_paper_status(paper_dir);
+    if (!is_reviewer_assigned(paper_dir, status.current_round,
+                              auth_manager_->get_username(session_id))) {
+      return protocol::Response(protocol::StatusCode::FORBIDDEN,
+                                "Paper not assigned to you");
+    }
+  }
+
+  // Choose latest version
+  std::vector<vfs::DirEntry> entries;
+  int max_ver = 1;
+  if (vfs_->readdir(versions_dir, entries) == 0) {
+    for (const auto &entry : entries) {
+      std::string name(entry.name, entry.name_len);
+      if (name.size() > 5 && name[0] == 'v' &&
+          name.substr(name.size() - 4) == ".pdf") {
+        try {
+          int v = std::stoi(name.substr(1, name.size() - 5));
+          if (v > max_ver)
+            max_ver = v;
+        } catch (...) {
+        }
+      }
+    }
+  }
   std::string paper_file =
-      "/papers/" + it_paper_id->second + "/versions/v1.pdf";
+      versions_dir + "/v" + std::to_string(max_ver) + ".pdf";
 
   if (!vfs_->exists(paper_file)) {
     return protocol::Response(protocol::StatusCode::NOT_FOUND,
@@ -657,8 +737,23 @@ ReviewServer::handle_submit_review(const protocol::Message &msg,
   }
 
   std::string username = auth_manager_->get_username(session_id);
-  std::string review_file =
-      "/papers/" + it_paper_id->second + "/reviews/" + username + ".txt";
+  std::string paper_dir = "/papers/" + it_paper_id->second;
+
+  PaperStatus status = load_paper_status(paper_dir);
+  std::string round = status.current_round;
+  auto it_round = msg.params.find("round");
+  if (it_round != msg.params.end()) {
+    round = it_round->second;
+  }
+
+  if (!is_reviewer_assigned(paper_dir, round, username)) {
+    return protocol::Response(protocol::StatusCode::FORBIDDEN,
+                              "Not assigned to this paper/round");
+  }
+
+  std::string review_dir = round_dir(paper_dir, round) + "/reviews";
+  ensure_round_dirs(paper_dir, round);
+  std::string review_file = review_dir + "/" + username + ".txt";
 
   vfs_->create_file(review_file);
   int fd = vfs_->open(review_file, O_WRONLY);
@@ -696,10 +791,10 @@ ReviewServer::handle_assign_reviewer(const protocol::Message &msg,
                               "Paper not found");
   }
 
-  // ===== COI CHECK =====
+  // ===== New logic: COI CHECK =====
   PaperMeta paper_meta;
   ReviewerProfile reviewer_profile;
-  
+
   if (assignment_service_->load_paper_meta(paper_id, paper_meta) &&
       assignment_service_->load_reviewer_profile(reviewer, reviewer_profile)) {
     auto coi = assignment_service_->check_coi(paper_meta, reviewer_profile);
@@ -709,20 +804,21 @@ ReviewServer::handle_assign_reviewer(const protocol::Message &msg,
     }
   }
 
-  // Check load
+  // Check reviewer load
   int active_load = assignment_service_->get_active_load(reviewer);
   auto config = assignment_service_->get_config();
   if (active_load >= config.max_active) {
     return protocol::Response(
         protocol::StatusCode::CONFLICT,
         "Reviewer has too many active assignments (" +
-            std::to_string(active_load) + "/" + std::to_string(config.max_active) + ")");
+            std::to_string(active_load) + "/" +
+            std::to_string(config.max_active) + ")");
   }
 
   // Load existing assignments and add new one
   std::vector<Assignment> assignments;
   assignment_service_->load_assignments(paper_id, assignments);
-  
+
   // Check if already assigned
   for (const auto &assign : assignments) {
     if (assign.reviewer == reviewer) {
@@ -743,18 +839,40 @@ ReviewServer::handle_assign_reviewer(const protocol::Message &msg,
                               "Failed to save assignment");
   }
 
-  // Update paper status to UNDER_REVIEW
+  // ===== Old logic compatibility: PaperStatus + round =====
+  PaperStatus status = load_paper_status(paper_dir);
+
+  auto it_blind = msg.params.find("blind");
+  if (it_blind != msg.params.end()) {
+    status.blind = protocol::Protocol::string_to_blind(it_blind->second);
+  }
+
+  std::string round = status.current_round;
+  auto it_round = msg.params.find("round");
+  if (it_round != msg.params.end()) {
+    round = it_round->second;
+  }
+
+  ensure_round_dirs(paper_dir, round);
+
+  // Update paper meta status in the new system
   if (assignment_service_->load_paper_meta(paper_id, paper_meta)) {
     paper_meta.status = "UNDER_REVIEW";
     assignment_service_->save_paper_meta(paper_meta);
   }
 
-  // Also maintain legacy reviewers.txt for backward compatibility
+  // Prepare legacy files for the next block (assignments/reviewers)
+  std::string assignments_path = assignments_file(paper_dir);
   std::string reviewers_file = paper_dir + "/reviewers.txt";
+
   if (!vfs_->exists(reviewers_file)) {
     vfs_->create_file(reviewers_file, 0644);
   }
 
+  // ===== Maintain legacy reviewers file (one reviewer per line) =====
+  if (!vfs_->exists(reviewers_file)) {
+    vfs_->create_file(reviewers_file, 0644);
+  }
   int fd = vfs_->open(reviewers_file, O_WRONLY);
   if (fd >= 0) {
     vfs_->seek(fd, 0, SEEK_END);
@@ -763,6 +881,25 @@ ReviewServer::handle_assign_reviewer(const protocol::Message &msg,
     vfs_->close(fd);
   }
 
+  // ===== Maintain assignments.txt for is_reviewer_assigned (round:reviewer) =====
+  if (!vfs_->exists(assignments_path)) {
+    vfs_->create_file(assignments_path, 0644);
+  }
+  int fd_assign = vfs_->open(assignments_path, O_WRONLY);
+  if (fd_assign < 0) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR, "IO Error");
+  }
+  vfs_->seek(fd_assign, 0, SEEK_END);
+  std::string assign_line = round + ":" + reviewer + "\n";
+  vfs_->write(fd_assign, assign_line.data(), assign_line.size());
+  vfs_->close(fd_assign);
+
+  // ===== Update PaperStatus (old system) =====
+  status.state = protocol::LifecycleState::UNDER_REVIEW;
+  status.current_round = round;
+  save_paper_status(paper_dir, status);
+
+
   return protocol::Response(protocol::StatusCode::OK, 
                             "Reviewer assigned (load: " + std::to_string(active_load + 1) + ")");
 }
@@ -770,8 +907,42 @@ ReviewServer::handle_assign_reviewer(const protocol::Message &msg,
 protocol::Response
 ReviewServer::handle_make_decision(const protocol::Message &msg,
                                    const std::string &session_id) {
-  // Implementation for making editorial decisions
-  return protocol::Response(protocol::StatusCode::OK, "Decision made");
+  auto it_paper_id = msg.params.find("paper_id");
+  auto it_decision = msg.params.find("decision");
+  if (it_paper_id == msg.params.end() || it_decision == msg.params.end()) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "Missing parameters");
+  }
+
+  std::string paper_dir = "/papers/" + it_paper_id->second;
+  if (!vfs_->exists(paper_dir)) {
+    return protocol::Response(protocol::StatusCode::NOT_FOUND,
+                              "Paper not found");
+  }
+
+  PaperStatus status = load_paper_status(paper_dir);
+  status.decision =
+      protocol::Protocol::string_to_decision(it_decision->second);
+
+  switch (status.decision) {
+  case protocol::Decision::ACCEPT:
+    status.state = protocol::LifecycleState::ACCEPTED;
+    break;
+  case protocol::Decision::REJECT:
+    status.state = protocol::LifecycleState::REJECTED;
+    break;
+  case protocol::Decision::MAJOR_REVISION:
+  case protocol::Decision::MINOR_REVISION:
+    status.state = protocol::LifecycleState::REBUTTAL;
+    status.current_round = "REBUTTAL";
+    break;
+  default:
+    status.state = protocol::LifecycleState::DECISION_PENDING;
+    break;
+  }
+
+  save_paper_status(paper_dir, status);
+  return protocol::Response(protocol::StatusCode::OK, "Decision updated");
 }
 
 protocol::Response
@@ -801,6 +972,9 @@ protocol::Response
 ReviewServer::handle_system_status(const std::string &session_id) {
   auto fs_stats = vfs_->get_fs_stats();
   auto cache_stats = vfs_->get_cache_stats();
+  auto journal_stats = vfs_->get_journal_stats();
+  auto snapshots = vfs_->list_backups();
+  auto journal_stats = vfs_->get_journal_stats();
 
   std::ostringstream oss;
   oss << "=== File System Stats ===\n";
@@ -819,6 +993,19 @@ ReviewServer::handle_system_status(const std::string &session_id) {
   oss << "Misses: " << cache_stats.misses << "\n";
   oss << "Hit rate: " << cache_stats.hit_rate() * 100 << "%\n";
   oss << "Evictions: " << cache_stats.evictions << "\n";
+
+  oss << "\n=== Journal ===\n";
+  oss << "Pending: " << journal_stats.pending << "\n";
+  oss << "Replayed: " << journal_stats.replayed << "\n";
+  oss << "Dirty: " << (journal_stats.dirty ? "yes" : "no") << "\n";
+  oss << "Recovered: " << (journal_stats.recovered ? "yes" : "no") << "\n";
+
+  oss << "\n=== Snapshots ===\n";
+  oss << "Count: " << snapshots.size() << "\n";
+  oss << "\n=== Journal Stats ===\n";
+  oss << "Replayed: " << journal_stats.replayed << "\n";
+  oss << "Pending: " << journal_stats.pending << "\n";
+  oss << "Recovered: " << (journal_stats.recovered ? "yes" : "no") << "\n";
 
   oss << "\n=== User Statistics ===\n";
   auto users = auth_manager_->list_users();
@@ -857,6 +1044,16 @@ ReviewServer::handle_system_status(const std::string &session_id) {
     }
   }
   oss << "Total Papers: " << papers << "\n";
+
+  auto snapshots = vfs_->list_backups();
+  oss << "\n=== Snapshots ===\n";
+  if (snapshots.empty()) {
+    oss << "(No snapshots)\n";
+  } else {
+    for (const auto &s : snapshots) {
+      oss << "- " << s << "\n";
+    }
+  }
 
   std::string status = oss.str();
 
@@ -960,7 +1157,23 @@ ReviewServer::handle_download_reviews(const protocol::Message &msg,
                               "Missing paper_id");
   }
   std::string paper_dir = "/papers/" + it_paper_id->second;
-  std::string reviews_dir = paper_dir + "/reviews";
+
+  PaperStatus status = load_paper_status(paper_dir);
+  std::string round = status.current_round;
+  auto it_round = msg.params.find("round");
+  if (it_round != msg.params.end()) {
+    round = it_round->second;
+  }
+
+  protocol::Role role = session_role(session_id);
+  if (role == protocol::Role::REVIEWER &&
+      !is_reviewer_assigned(paper_dir, round,
+                            auth_manager_->get_username(session_id))) {
+    return protocol::Response(protocol::StatusCode::FORBIDDEN,
+                              "Paper not assigned to you");
+  }
+
+  std::string reviews_dir = round_dir(paper_dir, round) + "/reviews";
 
   if (!vfs_->exists(reviews_dir)) {
     return protocol::Response(protocol::StatusCode::NOT_FOUND,
@@ -971,6 +1184,7 @@ ReviewServer::handle_download_reviews(const protocol::Message &msg,
   oss << "=== Reviews for " << it_paper_id->second << " ===\n\n";
 
   std::vector<vfs::DirEntry> entries;
+  int idx = 1;
   if (vfs_->readdir(reviews_dir, entries) == 0) {
     for (const auto &entry : entries) {
       if (entry.inode_num != 0) {
@@ -983,9 +1197,14 @@ ReviewServer::handle_download_reviews(const protocol::Message &msg,
           if (sz > 0) {
             std::vector<char> buf(sz);
             vfs_->read(fd, buf.data(), sz);
-            oss << "--- Review by " << rname.substr(0, rname.length() - 4)
-                << " ---\n";
+            std::string label = rname.substr(0, rname.length() - 4);
+            if (role == protocol::Role::AUTHOR ||
+                status.blind == protocol::BlindPolicy::DOUBLE_BLIND) {
+              label = "Reviewer_" + std::to_string(idx);
+            }
+            oss << "--- Review by " << label << " ---\n";
             oss << std::string(buf.data(), sz) << "\n\n";
+            idx++;
           }
           vfs_->close(fd);
         }
@@ -1016,21 +1235,11 @@ ReviewServer::handle_view_pending_papers(const std::string &session_id) {
     for (const auto &entry : entries) {
       std::string name(entry.name, entry.name_len);
       if (!name.empty() && name[0] == 'P') {
-        // Check status
-        std::string paper_dir = "/papers/" + name;
-        std::string status_file = paper_dir + "/status.txt";
-        int fd = vfs_->open(status_file, O_RDONLY);
-        if (fd >= 0) {
-          std::vector<char> buf(64);
-          ssize_t n = vfs_->read(fd, buf.data(), buf.size());
-          vfs_->close(fd);
-          std::string status(buf.data(), n);
-          if (status != "ACCEPTED" && status != "REJECTED") {
-            oss << "- " << name << " [" << status << "]\n";
-          }
-        } else {
-          // Assume new if no status
-          oss << "- " << name << " [SUBMITTED]\n";
+        PaperStatus status = load_paper_status("/papers/" + name);
+        if (status.state != protocol::LifecycleState::ACCEPTED &&
+            status.state != protocol::LifecycleState::REJECTED) {
+          oss << "- " << name << " ["
+              << protocol::Protocol::state_to_string(status.state) << "]\n";
         }
       }
     }
@@ -1048,8 +1257,128 @@ ReviewServer::handle_view_review_progress(const protocol::Message &msg,
   // Reuse view_paper_status which has progress details
   return handle_view_paper_status(msg, session_id);
 }
+// ===== PaperStatus / Legacy helpers (KEEP) =====
 
-// ===== Assignment & Profile Handlers =====
+ReviewServer::PaperStatus
+ReviewServer::load_paper_status(const std::string &paper_dir) {
+  PaperStatus st;
+  st.current_round = kDefaultRound;
+
+  std::string path = status_file_path(paper_dir);
+  std::string legacy = paper_dir + "/status.txt";
+  if (!vfs_->exists(path) && vfs_->exists(legacy)) {
+    path = legacy;
+  }
+  if (!vfs_->exists(path)) {
+    save_paper_status(paper_dir, st);
+    return st;
+  }
+
+  int fd = vfs_->open(path, O_RDONLY);
+  if (fd < 0) {
+    return st;
+  }
+
+  std::vector<char> buf(1024);
+  ssize_t n = vfs_->read(fd, buf.data(), buf.size());
+  vfs_->close(fd);
+  if (n <= 0) {
+    return st;
+  }
+
+  std::istringstream iss(std::string(buf.data(), n));
+  std::string line;
+  while (std::getline(iss, line)) {
+    size_t eq = line.find('=');
+    if (eq == std::string::npos)
+      continue;
+    std::string key = line.substr(0, eq);
+    std::string val = line.substr(eq + 1);
+    if (key == "current_round")
+      st.current_round = val;
+    else if (key == "blind")
+      st.blind = protocol::Protocol::string_to_blind(val);
+    else if (key == "decision")
+      st.decision = protocol::Protocol::string_to_decision(val);
+    else if (key == "state")
+      st.state = protocol::Protocol::string_to_state(val);
+  }
+
+  return st;
+}
+
+bool ReviewServer::save_paper_status(const std::string &paper_dir,
+                                     const PaperStatus &status) {
+  std::string path = status_file_path(paper_dir);
+  vfs_->create_file(path, 0644);
+  int fd = vfs_->open(path, O_WRONLY | O_TRUNC);
+  if (fd < 0)
+    return false;
+
+  std::ostringstream oss;
+  oss << "current_round=" << status.current_round << "\n";
+  oss << "blind=" << protocol::Protocol::blind_to_string(status.blind) << "\n";
+  oss << "decision="
+      << protocol::Protocol::decision_to_string(status.decision) << "\n";
+  oss << "state=" << protocol::Protocol::state_to_string(status.state) << "\n";
+  std::string data = oss.str();
+  vfs_->write(fd, data.data(), data.size());
+  vfs_->close(fd);
+  return true;
+}
+
+bool ReviewServer::ensure_round_dirs(const std::string &paper_dir,
+                                     const std::string &round_str) {
+  std::string rd = round_dir(paper_dir, round_str);
+  int r1 = vfs_->mkdir(rounds_root(paper_dir));
+  (void)r1;
+  int r2 = vfs_->mkdir(rd);
+  int r3 = vfs_->mkdir(rd + "/reviews");
+  return (r2 == 0 || r2 == -2) && (r3 == 0 || r3 == -2);
+}
+
+std::string ReviewServer::round_dir(const std::string &paper_dir,
+                                    const std::string &round_str) {
+  return rounds_root(paper_dir) + "/" + round_str;
+}
+
+bool ReviewServer::is_reviewer_assigned(const std::string &paper_dir,
+                                        const std::string &round_str,
+                                        const std::string &username) {
+  std::string assign = assignments_file(paper_dir);
+  if (!vfs_->exists(assign)) {
+    return false;
+  }
+  int fd = vfs_->open(assign, O_RDONLY);
+  if (fd < 0)
+    return false;
+
+  std::vector<char> buf(2048);
+  ssize_t n = vfs_->read(fd, buf.data(), buf.size());
+  vfs_->close(fd);
+  if (n <= 0)
+    return false;
+
+  std::istringstream iss(std::string(buf.data(), n));
+  std::string line;
+  while (std::getline(iss, line)) {
+    size_t colon = line.find(':');
+    if (colon == std::string::npos)
+      continue;
+    std::string round = line.substr(0, colon);
+    std::string reviewer = line.substr(colon + 1);
+    if (round == round_str && reviewer == username) {
+      return true;
+    }
+  }
+  return false;
+}
+
+protocol::Role ReviewServer::session_role(const std::string &session_id) {
+  return auth_manager_->get_user_role(session_id);
+}
+
+// ===== Assignment & Profile Handlers (KEEP) =====
 
 protocol::Response
 ReviewServer::handle_set_reviewer_profile(const protocol::Message &msg,
@@ -1064,10 +1393,10 @@ ReviewServer::handle_set_reviewer_profile(const protocol::Message &msg,
         return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                                   "Cannot determine username");
       }
-      
+
       ReviewerProfile profile;
       profile.username = username;
-      
+
       // Parse fields and keywords from params
       auto it_fields = msg.params.find("fields");
       if (it_fields != msg.params.end()) {
@@ -1075,7 +1404,6 @@ ReviewServer::handle_set_reviewer_profile(const protocol::Message &msg,
         std::string field;
         while (std::getline(iss, field, ',')) {
           std::string trimmed = field;
-          // Simple trim
           size_t start = trimmed.find_first_not_of(" \t");
           size_t end = trimmed.find_last_not_of(" \t");
           if (start != std::string::npos && end != std::string::npos) {
@@ -1083,7 +1411,7 @@ ReviewServer::handle_set_reviewer_profile(const protocol::Message &msg,
           }
         }
       }
-      
+
       auto it_keywords = msg.params.find("keywords");
       if (it_keywords != msg.params.end()) {
         std::istringstream iss(it_keywords->second);
@@ -1097,22 +1425,21 @@ ReviewServer::handle_set_reviewer_profile(const protocol::Message &msg,
           }
         }
       }
-      
+
       auto it_affiliation = msg.params.find("affiliation");
       if (it_affiliation != msg.params.end()) {
         profile.affiliation = it_affiliation->second;
       }
-      
+
       if (assignment_service_->save_reviewer_profile(profile)) {
-        return protocol::Response(protocol::StatusCode::OK,
-                                  "Profile updated");
+        return protocol::Response(protocol::StatusCode::OK, "Profile updated");
       } else {
         return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
                                   "Failed to save profile");
       }
     }
   }
-  
+
   return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                             "Invalid request");
 }
@@ -1122,24 +1449,24 @@ ReviewServer::handle_get_reviewer_profile(const protocol::Message &msg,
                                           const std::string &session_id) {
   auto it_username = msg.params.find("username");
   std::string username;
-  
+
   if (it_username == msg.params.end()) {
     username = auth_manager_->get_username(session_id);
   } else {
     username = it_username->second;
   }
-  
+
   if (username.empty()) {
     return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                               "Missing username");
   }
-  
+
   ReviewerProfile profile;
   if (!assignment_service_->load_reviewer_profile(username, profile)) {
     return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
                               "Failed to load profile");
   }
-  
+
   std::ostringstream oss;
   oss << "Username: " << profile.username << "\n";
   oss << "Fields: ";
@@ -1153,7 +1480,7 @@ ReviewServer::handle_get_reviewer_profile(const protocol::Message &msg,
     oss << profile.keywords[i];
   }
   oss << "\nAffiliation: " << profile.affiliation << "\n";
-  
+
   protocol::Response resp(protocol::StatusCode::OK, "Profile retrieved");
   std::string body = oss.str();
   resp.body.assign(body.begin(), body.end());
@@ -1164,31 +1491,32 @@ protocol::Response ReviewServer::handle_get_reviewer_recommendations(
     const protocol::Message &msg, const std::string &session_id) {
   auto it_paper_id = msg.params.find("paper_id");
   auto it_k = msg.params.find("k");
-  
+
   if (it_paper_id == msg.params.end()) {
     return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                               "Missing paper_id");
   }
-  
+
   int k = 5; // default
   if (it_k != msg.params.end()) {
     k = std::stoi(it_k->second);
   }
-  
+
   std::string paper_id = it_paper_id->second;
-  
+
   auto recommendations = assignment_service_->recommend_reviewers(paper_id, k);
-  
+
   std::ostringstream oss;
-  oss << "=== Top " << k << " Reviewer Recommendations for " << paper_id << " ===\n\n";
-  
+  oss << "=== Top " << k << " Reviewer Recommendations for " << paper_id
+      << " ===\n\n";
+
   int rank = 1;
   for (const auto &rec : recommendations) {
     oss << rank++ << ". " << rec.reviewer << "\n";
     oss << "   Relevance: " << rec.relevance_score << "\n";
     oss << "   Active Load: " << rec.active_load << "\n";
     oss << "   Final Score: " << rec.final_score << "\n";
-    
+
     if (rec.coi_blocked) {
       oss << "   [BLOCKED] " << rec.coi_reason << "\n";
     } else {
@@ -1196,8 +1524,9 @@ protocol::Response ReviewServer::handle_get_reviewer_recommendations(
     }
     oss << "\n";
   }
-  
-  protocol::Response resp(protocol::StatusCode::OK, "Recommendations generated");
+
+  protocol::Response resp(protocol::StatusCode::OK,
+                          "Recommendations generated");
   std::string body = oss.str();
   resp.body.assign(body.begin(), body.end());
   return resp;
@@ -1208,33 +1537,34 @@ ReviewServer::handle_auto_assign_reviewers(const protocol::Message &msg,
                                            const std::string &session_id) {
   auto it_paper_id = msg.params.find("paper_id");
   auto it_n = msg.params.find("n");
-  
+
   if (it_paper_id == msg.params.end() || it_n == msg.params.end()) {
     return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                               "Missing paper_id or n");
   }
-  
+
   std::string paper_id = it_paper_id->second;
   int n = std::stoi(it_n->second);
-  
+
   if (n <= 0 || n > 10) {
     return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                               "n must be between 1 and 10");
   }
-  
+
   auto result = assignment_service_->auto_assign(paper_id, n);
-  
+
   if (!result.success) {
     return protocol::Response(protocol::StatusCode::CONFLICT, result.message);
   }
-  
+
   std::ostringstream oss;
   oss << result.message << "\n\nAssigned reviewers:\n";
-  for (const auto &reviewer : result.assigned_reviewers) {
-    oss << "- " << reviewer << "\n";
+  for (const auto &r : result.assigned_reviewers) {
+    oss << "- " << r << "\n";
   }
-  
-  protocol::Response resp(protocol::StatusCode::OK, "Auto-assignment completed");
+
+  protocol::Response resp(protocol::StatusCode::OK,
+                          "Auto-assignment completed");
   std::string body = oss.str();
   resp.body.assign(body.begin(), body.end());
   return resp;
