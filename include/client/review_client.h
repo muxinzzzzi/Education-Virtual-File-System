@@ -66,6 +66,12 @@ private:
   void list_users();
   void list_backups();
   void restore_backup();
+  
+  // Profile & Assignment commands
+  void set_reviewer_profile();
+  void get_reviewer_profile();
+  void get_reviewer_recommendations();
+  void auto_assign_reviewers();
 
   // Helpers
   std::string read_line();

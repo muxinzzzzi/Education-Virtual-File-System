@@ -41,6 +41,12 @@ enum class Command {
   LIST_BACKUPS,
   SYSTEM_STATUS,
 
+  // Assignment & Profile commands
+  SET_REVIEWER_PROFILE,
+  GET_REVIEWER_PROFILE,
+  GET_REVIEWER_RECOMMENDATIONS,
+  AUTO_ASSIGN_REVIEWERS,
+
   UNKNOWN
 };
 
@@ -165,6 +171,14 @@ inline std::string Protocol::command_to_string(Command cmd) {
     return "LIST_BACKUPS";
   case Command::SYSTEM_STATUS:
     return "SYSTEM_STATUS";
+  case Command::SET_REVIEWER_PROFILE:
+    return "SET_REVIEWER_PROFILE";
+  case Command::GET_REVIEWER_PROFILE:
+    return "GET_REVIEWER_PROFILE";
+  case Command::GET_REVIEWER_RECOMMENDATIONS:
+    return "GET_REVIEWER_RECOMMENDATIONS";
+  case Command::AUTO_ASSIGN_REVIEWERS:
+    return "AUTO_ASSIGN_REVIEWERS";
   default:
     return "UNKNOWN";
   }
@@ -192,7 +206,11 @@ inline Command Protocol::string_to_command(const std::string &str) {
       {"CREATE_BACKUP", Command::CREATE_BACKUP},
       {"RESTORE_BACKUP", Command::RESTORE_BACKUP},
       {"LIST_BACKUPS", Command::LIST_BACKUPS},
-      {"SYSTEM_STATUS", Command::SYSTEM_STATUS}};
+      {"SYSTEM_STATUS", Command::SYSTEM_STATUS},
+      {"SET_REVIEWER_PROFILE", Command::SET_REVIEWER_PROFILE},
+      {"GET_REVIEWER_PROFILE", Command::GET_REVIEWER_PROFILE},
+      {"GET_REVIEWER_RECOMMENDATIONS", Command::GET_REVIEWER_RECOMMENDATIONS},
+      {"AUTO_ASSIGN_REVIEWERS", Command::AUTO_ASSIGN_REVIEWERS}};
 
   auto it = cmd_map.find(str);
   return it != cmd_map.end() ? it->second : Command::UNKNOWN;

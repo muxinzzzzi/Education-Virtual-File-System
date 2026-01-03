@@ -17,7 +17,7 @@ ReviewServer::~ReviewServer() { stop(); }
 
 bool ReviewServer::start() {
   // Initialize VFS
-  vfs_ = std::make_unique<vfs::VirtualFileSystem>();
+  vfs_ = std::make_shared<vfs::VirtualFileSystem>();
 
   // 1. Try to mount existing filesystem, otherwise format new one
   if (!vfs_->mount(fs_image_path_, 512)) {
@@ -54,7 +54,7 @@ bool ReviewServer::start() {
   }
 
   // Initialize auth manager
-  auth_manager_ = std::make_unique<AuthManager>();
+  auth_manager_ = std::make_shared<AuthManager>();
 
   // Create some demo users
   auth_manager_->create_user("alice", "password", protocol::Role::AUTHOR,
@@ -63,6 +63,9 @@ bool ReviewServer::start() {
                              "bob@univ.edu");
   auth_manager_->create_user("charlie", "password", protocol::Role::EDITOR,
                              "charlie@univ.edu");
+
+  // Initialize assignment service
+  assignment_service_ = std::make_unique<AssignmentService>(vfs_, auth_manager_);
 
   // Create server socket
   server_socket_ = socket(AF_INET, SOCK_STREAM, 0);
@@ -235,6 +238,14 @@ protocol::Response ReviewServer::handle_command(const protocol::Message &msg,
     return handle_view_pending_papers(session_id);
   case protocol::Command::VIEW_REVIEW_PROGRESS:
     return handle_view_review_progress(msg, session_id);
+  case protocol::Command::SET_REVIEWER_PROFILE:
+    return handle_set_reviewer_profile(msg, session_id);
+  case protocol::Command::GET_REVIEWER_PROFILE:
+    return handle_get_reviewer_profile(msg, session_id);
+  case protocol::Command::GET_REVIEWER_RECOMMENDATIONS:
+    return handle_get_reviewer_recommendations(msg, session_id);
+  case protocol::Command::AUTO_ASSIGN_REVIEWERS:
+    return handle_auto_assign_reviewers(msg, session_id);
   default:
     return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                               "Unknown command");
@@ -358,8 +369,37 @@ ReviewServer::handle_upload_paper(const protocol::Message &msg,
                               "Failed to open metadata file");
   }
 
-  // ---- 4. Write metadata content ----
+  // ---- 4. Write metadata content (with fields/keywords support) ----
   std::ostringstream meta_ss;
+  meta_ss << "author=" << username << "\n";
+  meta_ss << "title=" << it_title->second << "\n";
+  meta_ss << "status=SUBMITTED\n";
+  
+  // Optional fields and keywords
+  auto it_fields = msg.params.find("fields");
+  if (it_fields != msg.params.end()) {
+    meta_ss << "fields=" << it_fields->second << "\n";
+  } else {
+    meta_ss << "fields=\n";
+  }
+  
+  auto it_keywords = msg.params.find("keywords");
+  if (it_keywords != msg.params.end()) {
+    meta_ss << "keywords=" << it_keywords->second << "\n";
+  } else {
+    meta_ss << "keywords=\n";
+  }
+  
+  // Optional conflict list
+  auto it_conflicts = msg.params.find("conflict_usernames");
+  if (it_conflicts != msg.params.end()) {
+    meta_ss << "conflict_usernames=" << it_conflicts->second << "\n";
+  } else {
+    meta_ss << "conflict_usernames=\n";
+  }
+  
+  // Legacy format for backward compatibility
+  meta_ss << "\n--- Legacy Format ---\n";
   meta_ss << "Title: " << it_title->second << "\n"
           << "Uploader: " << username << "\n"
           << "Upload Time: " << std::time(nullptr) << "\n";
@@ -656,31 +696,75 @@ ReviewServer::handle_assign_reviewer(const protocol::Message &msg,
                               "Paper not found");
   }
 
-  // Add to reviewers.txt
+  // ===== COI CHECK =====
+  PaperMeta paper_meta;
+  ReviewerProfile reviewer_profile;
+  
+  if (assignment_service_->load_paper_meta(paper_id, paper_meta) &&
+      assignment_service_->load_reviewer_profile(reviewer, reviewer_profile)) {
+    auto coi = assignment_service_->check_coi(paper_meta, reviewer_profile);
+    if (coi.has_conflict) {
+      return protocol::Response(protocol::StatusCode::CONFLICT,
+                                "COI detected: " + coi.reason);
+    }
+  }
+
+  // Check load
+  int active_load = assignment_service_->get_active_load(reviewer);
+  auto config = assignment_service_->get_config();
+  if (active_load >= config.max_active) {
+    return protocol::Response(
+        protocol::StatusCode::CONFLICT,
+        "Reviewer has too many active assignments (" +
+            std::to_string(active_load) + "/" + std::to_string(config.max_active) + ")");
+  }
+
+  // Load existing assignments and add new one
+  std::vector<Assignment> assignments;
+  assignment_service_->load_assignments(paper_id, assignments);
+  
+  // Check if already assigned
+  for (const auto &assign : assignments) {
+    if (assign.reviewer == reviewer) {
+      return protocol::Response(protocol::StatusCode::CONFLICT,
+                                "Reviewer already assigned to this paper");
+    }
+  }
+
+  Assignment new_assign;
+  new_assign.paper_id = paper_id;
+  new_assign.reviewer = reviewer;
+  new_assign.assigned_at = std::time(nullptr);
+  new_assign.state = "pending";
+  assignments.push_back(new_assign);
+
+  if (!assignment_service_->save_assignments(paper_id, assignments)) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                              "Failed to save assignment");
+  }
+
+  // Update paper status to UNDER_REVIEW
+  if (assignment_service_->load_paper_meta(paper_id, paper_meta)) {
+    paper_meta.status = "UNDER_REVIEW";
+    assignment_service_->save_paper_meta(paper_meta);
+  }
+
+  // Also maintain legacy reviewers.txt for backward compatibility
   std::string reviewers_file = paper_dir + "/reviewers.txt";
   if (!vfs_->exists(reviewers_file)) {
     vfs_->create_file(reviewers_file, 0644);
   }
 
-  int fd = vfs_->open(reviewers_file, O_WRONLY); // offset 0
-  if (fd < 0)
-    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR, "IO Error");
-
-  vfs_->seek(fd, 0, SEEK_END);
-  std::string line = reviewer + "\n";
-  vfs_->write(fd, line.data(), line.size());
-  vfs_->close(fd);
-
-  // Update State to UNDER_REVIEW
-  std::string status_file = paper_dir + "/status.txt";
-  fd = vfs_->open(status_file, O_WRONLY | O_TRUNC);
+  int fd = vfs_->open(reviewers_file, O_WRONLY);
   if (fd >= 0) {
-    std::string s = "UNDER_REVIEW";
-    vfs_->write(fd, s.data(), s.size());
+    vfs_->seek(fd, 0, SEEK_END);
+    std::string line = reviewer + "\n";
+    vfs_->write(fd, line.data(), line.size());
     vfs_->close(fd);
   }
 
-  return protocol::Response(protocol::StatusCode::OK, "Reviewer assigned");
+  return protocol::Response(protocol::StatusCode::OK, 
+                            "Reviewer assigned (load: " + std::to_string(active_load + 1) + ")");
 }
 
 protocol::Response
@@ -963,6 +1047,197 @@ ReviewServer::handle_view_review_progress(const protocol::Message &msg,
                                           const std::string &session_id) {
   // Reuse view_paper_status which has progress details
   return handle_view_paper_status(msg, session_id);
+}
+
+// ===== Assignment & Profile Handlers =====
+
+protocol::Response
+ReviewServer::handle_set_reviewer_profile(const protocol::Message &msg,
+                                          const std::string &session_id) {
+  auto it_username = msg.params.find("username");
+  if (it_username == msg.params.end()) {
+    // Default to current user
+    it_username = msg.params.find("session_username");
+    if (it_username == msg.params.end()) {
+      std::string username = auth_manager_->get_username(session_id);
+      if (username.empty()) {
+        return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                                  "Cannot determine username");
+      }
+      
+      ReviewerProfile profile;
+      profile.username = username;
+      
+      // Parse fields and keywords from params
+      auto it_fields = msg.params.find("fields");
+      if (it_fields != msg.params.end()) {
+        std::istringstream iss(it_fields->second);
+        std::string field;
+        while (std::getline(iss, field, ',')) {
+          std::string trimmed = field;
+          // Simple trim
+          size_t start = trimmed.find_first_not_of(" \t");
+          size_t end = trimmed.find_last_not_of(" \t");
+          if (start != std::string::npos && end != std::string::npos) {
+            profile.fields.push_back(trimmed.substr(start, end - start + 1));
+          }
+        }
+      }
+      
+      auto it_keywords = msg.params.find("keywords");
+      if (it_keywords != msg.params.end()) {
+        std::istringstream iss(it_keywords->second);
+        std::string kw;
+        while (std::getline(iss, kw, ',')) {
+          std::string trimmed = kw;
+          size_t start = trimmed.find_first_not_of(" \t");
+          size_t end = trimmed.find_last_not_of(" \t");
+          if (start != std::string::npos && end != std::string::npos) {
+            profile.keywords.push_back(trimmed.substr(start, end - start + 1));
+          }
+        }
+      }
+      
+      auto it_affiliation = msg.params.find("affiliation");
+      if (it_affiliation != msg.params.end()) {
+        profile.affiliation = it_affiliation->second;
+      }
+      
+      if (assignment_service_->save_reviewer_profile(profile)) {
+        return protocol::Response(protocol::StatusCode::OK,
+                                  "Profile updated");
+      } else {
+        return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                                  "Failed to save profile");
+      }
+    }
+  }
+  
+  return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                            "Invalid request");
+}
+
+protocol::Response
+ReviewServer::handle_get_reviewer_profile(const protocol::Message &msg,
+                                          const std::string &session_id) {
+  auto it_username = msg.params.find("username");
+  std::string username;
+  
+  if (it_username == msg.params.end()) {
+    username = auth_manager_->get_username(session_id);
+  } else {
+    username = it_username->second;
+  }
+  
+  if (username.empty()) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "Missing username");
+  }
+  
+  ReviewerProfile profile;
+  if (!assignment_service_->load_reviewer_profile(username, profile)) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                              "Failed to load profile");
+  }
+  
+  std::ostringstream oss;
+  oss << "Username: " << profile.username << "\n";
+  oss << "Fields: ";
+  for (size_t i = 0; i < profile.fields.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << profile.fields[i];
+  }
+  oss << "\nKeywords: ";
+  for (size_t i = 0; i < profile.keywords.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << profile.keywords[i];
+  }
+  oss << "\nAffiliation: " << profile.affiliation << "\n";
+  
+  protocol::Response resp(protocol::StatusCode::OK, "Profile retrieved");
+  std::string body = oss.str();
+  resp.body.assign(body.begin(), body.end());
+  return resp;
+}
+
+protocol::Response ReviewServer::handle_get_reviewer_recommendations(
+    const protocol::Message &msg, const std::string &session_id) {
+  auto it_paper_id = msg.params.find("paper_id");
+  auto it_k = msg.params.find("k");
+  
+  if (it_paper_id == msg.params.end()) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "Missing paper_id");
+  }
+  
+  int k = 5; // default
+  if (it_k != msg.params.end()) {
+    k = std::stoi(it_k->second);
+  }
+  
+  std::string paper_id = it_paper_id->second;
+  
+  auto recommendations = assignment_service_->recommend_reviewers(paper_id, k);
+  
+  std::ostringstream oss;
+  oss << "=== Top " << k << " Reviewer Recommendations for " << paper_id << " ===\n\n";
+  
+  int rank = 1;
+  for (const auto &rec : recommendations) {
+    oss << rank++ << ". " << rec.reviewer << "\n";
+    oss << "   Relevance: " << rec.relevance_score << "\n";
+    oss << "   Active Load: " << rec.active_load << "\n";
+    oss << "   Final Score: " << rec.final_score << "\n";
+    
+    if (rec.coi_blocked) {
+      oss << "   [BLOCKED] " << rec.coi_reason << "\n";
+    } else {
+      oss << "   [OK] No COI detected\n";
+    }
+    oss << "\n";
+  }
+  
+  protocol::Response resp(protocol::StatusCode::OK, "Recommendations generated");
+  std::string body = oss.str();
+  resp.body.assign(body.begin(), body.end());
+  return resp;
+}
+
+protocol::Response
+ReviewServer::handle_auto_assign_reviewers(const protocol::Message &msg,
+                                           const std::string &session_id) {
+  auto it_paper_id = msg.params.find("paper_id");
+  auto it_n = msg.params.find("n");
+  
+  if (it_paper_id == msg.params.end() || it_n == msg.params.end()) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "Missing paper_id or n");
+  }
+  
+  std::string paper_id = it_paper_id->second;
+  int n = std::stoi(it_n->second);
+  
+  if (n <= 0 || n > 10) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "n must be between 1 and 10");
+  }
+  
+  auto result = assignment_service_->auto_assign(paper_id, n);
+  
+  if (!result.success) {
+    return protocol::Response(protocol::StatusCode::CONFLICT, result.message);
+  }
+  
+  std::ostringstream oss;
+  oss << result.message << "\n\nAssigned reviewers:\n";
+  for (const auto &reviewer : result.assigned_reviewers) {
+    oss << "- " << reviewer << "\n";
+  }
+  
+  protocol::Response resp(protocol::StatusCode::OK, "Auto-assignment completed");
+  std::string body = oss.str();
+  resp.body.assign(body.begin(), body.end());
+  return resp;
 }
 
 bool ReviewServer::send_response(int socket,

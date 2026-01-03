@@ -4,6 +4,7 @@
 #include "common/protocol.h"
 #include "filesystem/vfs.h"
 #include "server/auth_manager.h"
+#include "server/assignment_service.h"
 #include <atomic>
 #include <memory>
 #include <thread>
@@ -27,8 +28,9 @@ private:
   int server_socket_;
   std::atomic<bool> running_;
 
-  std::unique_ptr<vfs::VirtualFileSystem> vfs_;
-  std::unique_ptr<AuthManager> auth_manager_;
+  std::shared_ptr<vfs::VirtualFileSystem> vfs_;
+  std::shared_ptr<AuthManager> auth_manager_;
+  std::unique_ptr<AssignmentService> assignment_service_;
 
   std::vector<std::thread> worker_threads_;
 
@@ -83,6 +85,16 @@ private:
   protocol::Response handle_view_pending_papers(const std::string &session_id);
   protocol::Response handle_view_review_progress(const protocol::Message &msg,
                                                  const std::string &session_id);
+
+  // Assignment & Profile commands
+  protocol::Response handle_set_reviewer_profile(const protocol::Message &msg,
+                                                 const std::string &session_id);
+  protocol::Response handle_get_reviewer_profile(const protocol::Message &msg,
+                                                 const std::string &session_id);
+  protocol::Response handle_get_reviewer_recommendations(
+      const protocol::Message &msg, const std::string &session_id);
+  protocol::Response handle_auto_assign_reviewers(const protocol::Message &msg,
+                                                  const std::string &session_id);
 
   // Helpers
   bool send_response(int socket, const protocol::Response &response);

@@ -177,7 +177,9 @@ void ReviewClient::show_reviewer_menu() {
   std::cout << "1. Download Paper\n";
   std::cout << "2. Submit Review\n";
   std::cout << "3. View Review Status\n";
-  std::cout << "4. Logout\n";
+  std::cout << "4. Set My Profile (fields/keywords)\n";
+  std::cout << "5. View My Profile\n";
+  std::cout << "6. Logout\n";
   std::cout << "Choice: ";
 
   int choice;
@@ -195,6 +197,12 @@ void ReviewClient::show_reviewer_menu() {
     view_review_status();
     break;
   case 4:
+    set_reviewer_profile();
+    break;
+  case 5:
+    get_reviewer_profile();
+    break;
+  case 6:
     logout();
     break;
   default:
@@ -204,11 +212,13 @@ void ReviewClient::show_reviewer_menu() {
 
 void ReviewClient::show_editor_menu() {
   std::cout << "\n=== Editor Menu ===\n";
-  std::cout << "1. Assign Reviewer\n";
+  std::cout << "1. Assign Reviewer (Manual)\n";
   std::cout << "2. Make Decision\n";
   std::cout << "3. View Pending Papers\n";
   std::cout << "4. View Review Progress\n";
-  std::cout << "5. Logout\n";
+  std::cout << "5. Get Reviewer Recommendations (Auto)\n";
+  std::cout << "6. Auto Assign Reviewers\n";
+  std::cout << "7. Logout\n";
   std::cout << "Choice: ";
 
   int choice;
@@ -229,6 +239,12 @@ void ReviewClient::show_editor_menu() {
     view_review_progress();
     break;
   case 5:
+    get_reviewer_recommendations();
+    break;
+  case 6:
+    auto_assign_reviewers();
+    break;
+  case 7:
     logout();
     break;
   default:
@@ -672,6 +688,93 @@ void ReviewClient::save_file(const std::string &path,
                              const std::vector<char> &data) {
   std::ofstream file(path, std::ios::binary);
   file.write(data.data(), data.size());
+}
+
+// ===== Profile & Assignment Methods =====
+
+void ReviewClient::set_reviewer_profile() {
+  std::cout << "Enter your research fields (comma-separated, e.g., AI,ML,NLP): ";
+  std::string fields = read_line();
+  
+  std::cout << "Enter your keywords (comma-separated, e.g., deep learning,transformer): ";
+  std::string keywords = read_line();
+  
+  std::cout << "Enter your affiliation (e.g., MIT, Stanford): ";
+  std::string affiliation = read_line();
+  
+  protocol::Message msg;
+  msg.command = protocol::Command::SET_REVIEWER_PROFILE;
+  msg.params["fields"] = fields;
+  msg.params["keywords"] = keywords;
+  msg.params["affiliation"] = affiliation;
+  
+  send_message(msg);
+  protocol::Response resp;
+  receive_response(resp);
+  
+  std::cout << resp.message << "\n";
+}
+
+void ReviewClient::get_reviewer_profile() {
+  protocol::Message msg;
+  msg.command = protocol::Command::GET_REVIEWER_PROFILE;
+  
+  send_message(msg);
+  protocol::Response resp;
+  receive_response(resp);
+  
+  std::cout << "\n" << resp.message << "\n";
+  if (!resp.body.empty()) {
+    std::cout << std::string(resp.body.begin(), resp.body.end()) << "\n";
+  }
+}
+
+void ReviewClient::get_reviewer_recommendations() {
+  std::cout << "Paper ID: ";
+  std::string paper_id = read_line();
+  
+  std::cout << "Top K (default 5): ";
+  std::string k_str = read_line();
+  int k = k_str.empty() ? 5 : std::stoi(k_str);
+  
+  protocol::Message msg;
+  msg.command = protocol::Command::GET_REVIEWER_RECOMMENDATIONS;
+  msg.params["paper_id"] = paper_id;
+  msg.params["k"] = std::to_string(k);
+  
+  send_message(msg);
+  protocol::Response resp;
+  receive_response(resp);
+  
+  std::cout << "\n";
+  if (!resp.body.empty()) {
+    std::cout << std::string(resp.body.begin(), resp.body.end()) << "\n";
+  } else {
+    std::cout << resp.message << "\n";
+  }
+}
+
+void ReviewClient::auto_assign_reviewers() {
+  std::cout << "Paper ID: ";
+  std::string paper_id = read_line();
+  
+  std::cout << "Number of reviewers to assign: ";
+  std::string n_str = read_line();
+  int n = std::stoi(n_str);
+  
+  protocol::Message msg;
+  msg.command = protocol::Command::AUTO_ASSIGN_REVIEWERS;
+  msg.params["paper_id"] = paper_id;
+  msg.params["n"] = std::to_string(n);
+  
+  send_message(msg);
+  protocol::Response resp;
+  receive_response(resp);
+  
+  std::cout << "\n" << resp.message << "\n";
+  if (!resp.body.empty()) {
+    std::cout << std::string(resp.body.begin(), resp.body.end()) << "\n";
+  }
 }
 
 } // namespace client

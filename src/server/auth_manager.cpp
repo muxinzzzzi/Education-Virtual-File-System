@@ -192,6 +192,16 @@ bool AuthManager::authorize(const std::string &session_id,
   case protocol::Command::SYSTEM_STATUS:
     return role == protocol::Role::ADMIN;
 
+  case protocol::Command::SET_REVIEWER_PROFILE:
+  case protocol::Command::GET_REVIEWER_PROFILE:
+    // Reviewers and admins can manage profiles
+    return role == protocol::Role::REVIEWER || role == protocol::Role::ADMIN;
+
+  case protocol::Command::GET_REVIEWER_RECOMMENDATIONS:
+  case protocol::Command::AUTO_ASSIGN_REVIEWERS:
+    // Editors and admins can use auto-assignment
+    return role == protocol::Role::EDITOR || role == protocol::Role::ADMIN;
+
   case protocol::Command::LOGIN:
   case protocol::Command::LOGOUT:
     return true; // Everyone can login/logout
