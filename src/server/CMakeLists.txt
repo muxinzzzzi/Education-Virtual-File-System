@@ -1,6 +1,7 @@
 add_library(server STATIC
     auth_manager.cpp
     review_server.cpp
+    assignment_service.cpp
 )
 
 target_include_directories(server PUBLIC
