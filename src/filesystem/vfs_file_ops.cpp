@@ -429,65 +429,11 @@ bool VirtualFileSystem::create_backup(const std::string &backup_name) {
   if (!mounted_) {
     return false;
   }
-
-  std::string backup_path = image_path_ + "." + backup_name + ".backup";
-  std::ifstream src(image_path_, std::ios::binary);
-  std::ofstream dst(backup_path, std::ios::binary);
-
-  if (!src || !dst) {
-    return false;
-  }
-
-  dst << src.rdbuf();
-  return true;
+  return create_snapshot(backup_name);
 }
 
 std::vector<std::string> VirtualFileSystem::list_backups() {
-  std::vector<std::string> backups;
-
-  if (image_path_.empty()) {
-    return backups;
-  }
-
-  // Use std::filesystem to scan directory
-  try {
-    fs::path img_path(image_path_);
-    fs::path parent_dir = img_path.parent_path();
-    if (parent_dir.empty()) {
-      parent_dir = ".";
-    }
-
-    if (fs::exists(parent_dir) && fs::is_directory(parent_dir)) {
-      std::string base_name = img_path.filename().string() + ".";
-
-      for (const auto &entry : fs::directory_iterator(parent_dir)) {
-        if (entry.is_regular_file()) {
-          std::string fname = entry.path().filename().string();
-
-          // Check if it matches pattern: <image_name>.<backup_name>.backup
-          if (fname.length() > base_name.length() &&
-              fname.substr(0, base_name.length()) == base_name) {
-
-            // Check suffix
-            if (fname.length() > 7 &&
-                fname.substr(fname.length() - 7) == ".backup") {
-              // Extract backup name
-              size_t start_pos = base_name.length();
-              size_t len = fname.length() - 7 - start_pos;
-
-              if (len > 0) {
-                backups.push_back(fname.substr(start_pos, len));
-              }
-            }
-          }
-        }
-      }
-    }
-  } catch (const std::exception &e) {
-    std::cerr << "Error listing backups: " << e.what() << std::endl;
-  }
-
-  return backups;
+  return list_snapshots();
 }
 
 bool VirtualFileSystem::restore_backup(const std::string &backup_name) {
@@ -497,15 +443,91 @@ bool VirtualFileSystem::restore_backup(const std::string &backup_name) {
     return false; // Must unmount first
   }
 
-  std::string backup_path = image_path_ + "." + backup_name + ".backup";
-  std::ifstream src(backup_path, std::ios::binary);
-  std::ofstream dst(image_path_, std::ios::binary | std::ios::trunc);
+  return restore_snapshot(backup_name);
+}
 
-  if (!src || !dst) {
+bool VirtualFileSystem::create_snapshot(const std::string &name) {
+  std::unique_lock<std::shared_mutex> lock(fs_mutex_);
+  if (!mounted_ || name.empty()) {
     return false;
   }
 
-  dst << src.rdbuf();
+  std::string diff_path = image_path_ + ".snap." + name + ".diff";
+  SnapshotMeta meta;
+  meta.name = name;
+  meta.diff_path = diff_path;
+  meta.index_path = diff_path + ".idx";
+
+  std::ofstream diff(diff_path, std::ios::binary | std::ios::trunc);
+  if (!diff) {
+    return false;
+  }
+
+  snapshots_[name] = std::move(meta);
+  return true;
+}
+
+std::vector<std::string> VirtualFileSystem::list_snapshots() {
+  std::unique_lock<std::shared_mutex> lock(fs_mutex_);
+  if (snapshots_.empty()) {
+    load_snapshots();
+  }
+  std::vector<std::string> names;
+  for (const auto &kv : snapshots_) {
+    names.push_back(kv.first);
+  }
+  return names;
+}
+
+bool VirtualFileSystem::restore_snapshot(const std::string &name) {
+  if (name.empty()) {
+    return false;
+  }
+
+  // Ensure latest snapshot list
+  load_snapshots();
+  auto it = snapshots_.find(name);
+  if (it == snapshots_.end()) {
+    return false;
+  }
+
+  SnapshotMeta meta = it->second;
+  snapshots_.erase(it);
+
+  std::ifstream diff(meta.diff_path, std::ios::binary);
+  if (!diff) {
+    return false;
+  }
+
+  std::fstream image(image_path_, std::ios::in | std::ios::out | std::ios::binary);
+  if (!image) {
+    return false;
+  }
+
+  while (diff) {
+    uint32_t block_num = 0;
+    diff.read(reinterpret_cast<char *>(&block_num), sizeof(block_num));
+    if (!diff)
+      break;
+    std::vector<char> buf(BLOCK_SIZE);
+    diff.read(buf.data(), BLOCK_SIZE);
+    if (!diff)
+      break;
+    uint64_t offset = static_cast<uint64_t>(block_num) * BLOCK_SIZE;
+    image.seekp(offset);
+    image.write(buf.data(), BLOCK_SIZE);
+  }
+  image.flush();
+
+  try {
+    fs::remove(meta.diff_path);
+    fs::remove(meta.index_path);
+    if (!checksum_path_.empty() && fs::exists(checksum_path_)) {
+      fs::remove(checksum_path_);
+    }
+  } catch (...) {
+  }
+
   return true;
 }
 

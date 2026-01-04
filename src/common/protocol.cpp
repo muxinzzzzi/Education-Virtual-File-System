@@ -1,6 +1,7 @@
 #include "common/protocol.h"
 #include <cstring>
 #include <sstream>
+#include <algorithm>
 
 namespace protocol {
 

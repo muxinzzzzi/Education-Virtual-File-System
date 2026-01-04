@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -108,6 +110,12 @@ bool VirtualFileSystem::format(const std::string &image_path, uint32_t size_mb,
   ofs.flush();
   ofs.close();
 
+  try {
+    std::filesystem::remove(image_path + ".checksum");
+    std::filesystem::remove(image_path + ".journal");
+  } catch (...) {
+  }
+
   // --- SELF-VERIFICATION ---
   {
     std::ifstream check(image_path, std::ios::binary);
@@ -177,6 +185,11 @@ bool VirtualFileSystem::mount(const std::string &image_path,
   cache_ = std::make_unique<LRUCache>(cache_capacity);
 
   image_path_ = image_path;
+  journal_path_ = image_path_ + ".journal";
+  checksum_path_ = image_path_ + ".checksum";
+  load_checksums();
+  replay_journal();
+  load_snapshots();
   mounted_ = true;
 
   return true;
@@ -209,6 +222,9 @@ void VirtualFileSystem::unmount() {
           to_write);
     }
   }
+
+  save_checksums();
+  flush_and_clear_journal();
 
   // Close file handles
   fd_table_.clear();
@@ -244,6 +260,15 @@ bool VirtualFileSystem::read_block(uint32_t block_num,
     return false;
   }
 
+  if (block_num < block_checksums_.size() && block_checksums_[block_num] != 0) {
+    uint32_t expect = block_checksums_[block_num];
+    uint32_t got = calc_checksum(data);
+    if (expect != got) {
+      std::cerr << "[VFS WARN] Checksum mismatch on block " << block_num
+                << " expect " << expect << " got " << got << "\n";
+    }
+  }
+
   // Update cache
   cache_->put(block_num, data);
 
@@ -256,6 +281,14 @@ bool VirtualFileSystem::write_block(uint32_t block_num,
     return false;
   }
 
+  // Capture original block for snapshots
+  std::vector<char> original;
+  if (!snapshots_.empty()) {
+    read_block(block_num, original);
+  }
+
+  append_journal_entry(block_num, data);
+
   // Write to disk
   uint64_t offset = static_cast<uint64_t>(block_num) * BLOCK_SIZE;
   image_file_.clear(); // Clear any error flags
@@ -267,6 +300,14 @@ bool VirtualFileSystem::write_block(uint32_t block_num,
     std::cerr << "[VFS ERROR] write_block: Failed to write block " << block_num
               << "\n";
     return false;
+  }
+
+  if (block_num < block_checksums_.size()) {
+    block_checksums_[block_num] = calc_checksum(data);
+  }
+
+  if (!snapshots_.empty()) {
+    snapshot_record_block(block_num, original);
   }
 
   // Update cache
@@ -434,6 +475,185 @@ FileSystemStats VirtualFileSystem::get_fs_stats() const {
 
 CacheStats VirtualFileSystem::get_cache_stats() const {
   return cache_->get_stats();
+}
+
+VirtualFileSystem::JournalStats VirtualFileSystem::get_journal_stats() const {
+  return journal_stats_;
+}
+
+uint32_t VirtualFileSystem::calc_checksum(const std::vector<char> &data) const {
+  uint32_t h = 0;
+  for (unsigned char c : data) {
+    h = (h * 131) + c;
+  }
+  return h;
+}
+
+void VirtualFileSystem::load_checksums() {
+  block_checksums_.assign(superblock_.total_blocks, 0);
+  if (checksum_path_.empty()) {
+    return;
+  }
+  std::ifstream in(checksum_path_, std::ios::binary);
+  if (!in) {
+    return;
+  }
+  in.read(reinterpret_cast<char *>(block_checksums_.data()),
+          block_checksums_.size() * sizeof(uint32_t));
+}
+
+void VirtualFileSystem::save_checksums() {
+  if (checksum_path_.empty() || block_checksums_.empty()) {
+    return;
+  }
+  std::ofstream out(checksum_path_, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    return;
+  }
+  out.write(reinterpret_cast<const char *>(block_checksums_.data()),
+            block_checksums_.size() * sizeof(uint32_t));
+}
+
+bool VirtualFileSystem::append_journal_entry(uint32_t block_num,
+                                             const std::vector<char> &data) {
+  if (journal_path_.empty()) {
+    return false;
+  }
+  std::ofstream jf(journal_path_, std::ios::binary | std::ios::app);
+  if (!jf) {
+    return false;
+  }
+  uint32_t size = static_cast<uint32_t>(data.size());
+  uint32_t checksum = calc_checksum(data);
+  jf.write(reinterpret_cast<const char *>(&block_num), sizeof(block_num));
+  jf.write(reinterpret_cast<const char *>(&size), sizeof(size));
+  jf.write(reinterpret_cast<const char *>(&checksum), sizeof(checksum));
+  jf.write(data.data(), data.size());
+  jf.flush();
+  journal_stats_.pending++;
+  journal_stats_.dirty = true;
+  return jf.good();
+}
+
+bool VirtualFileSystem::replay_journal() {
+  if (journal_path_.empty()) {
+    return true;
+  }
+  std::ifstream jf(journal_path_, std::ios::binary);
+  if (!jf) {
+    return true; // No journal to replay
+  }
+
+  while (jf) {
+    uint32_t block_num = 0;
+    uint32_t size = 0;
+    uint32_t checksum = 0;
+    jf.read(reinterpret_cast<char *>(&block_num), sizeof(block_num));
+    jf.read(reinterpret_cast<char *>(&size), sizeof(size));
+    jf.read(reinterpret_cast<char *>(&checksum), sizeof(checksum));
+    if (!jf) {
+      break;
+    }
+    if (size != BLOCK_SIZE) {
+      break;
+    }
+    std::vector<char> data(size);
+    jf.read(data.data(), size);
+    if (!jf) {
+      break;
+    }
+    if (calc_checksum(data) != checksum) {
+      std::cerr << "[JOURNAL] checksum mismatch, skipping entry\n";
+      continue;
+    }
+    uint64_t offset = static_cast<uint64_t>(block_num) * BLOCK_SIZE;
+    image_file_.seekp(offset);
+    image_file_.write(data.data(), BLOCK_SIZE);
+    journal_stats_.replayed++;
+  }
+
+  image_file_.flush();
+  flush_and_clear_journal();
+  if (journal_stats_.replayed > 0) {
+    journal_stats_.recovered = true;
+  }
+  return true;
+}
+
+bool VirtualFileSystem::flush_and_clear_journal() {
+  if (journal_path_.empty()) {
+    return true;
+  }
+  std::ofstream clear(journal_path_, std::ios::trunc);
+  journal_stats_.pending = 0;
+  journal_stats_.dirty = false;
+  return clear.good();
+}
+
+void VirtualFileSystem::load_snapshots() {
+  snapshots_.clear();
+  if (image_path_.empty())
+    return;
+  try {
+    std::filesystem::path img(image_path_);
+    auto parent = img.parent_path().empty() ? std::filesystem::path(".")
+                                            : img.parent_path();
+    std::string base = img.filename().string();
+    for (const auto &entry : std::filesystem::directory_iterator(parent)) {
+      if (!entry.is_regular_file())
+        continue;
+      auto fname = entry.path().filename().string();
+      std::string prefix = base + ".snap.";
+      if (fname.rfind(prefix, 0) == 0 && fname.size() > prefix.size()) {
+        if (fname.find(".diff", prefix.size()) != std::string::npos) {
+          std::string snap_name =
+              fname.substr(prefix.size(), fname.size() - prefix.size() - 5);
+          SnapshotMeta meta;
+          meta.name = snap_name;
+          meta.diff_path = entry.path().string();
+          meta.index_path = entry.path().replace_extension(".idx").string();
+          // rebuild block list
+          std::ifstream diff(meta.diff_path, std::ios::binary);
+          while (diff) {
+            uint32_t b = 0;
+            diff.read(reinterpret_cast<char *>(&b), sizeof(b));
+            if (!diff)
+              break;
+            std::vector<char> buf(BLOCK_SIZE);
+            diff.read(buf.data(), BLOCK_SIZE);
+            if (!diff)
+              break;
+            meta.blocks.insert(b);
+          }
+          snapshots_[snap_name] = std::move(meta);
+        }
+      }
+    }
+  } catch (const std::exception &e) {
+    std::cerr << "[SNAPSHOT] load failed: " << e.what() << "\n";
+  }
+}
+
+bool VirtualFileSystem::snapshot_record_block(
+    uint32_t block_num, const std::vector<char> &original) {
+  std::vector<char> data = original;
+  if (data.size() != BLOCK_SIZE) {
+    data.assign(BLOCK_SIZE, 0);
+  }
+  for (auto &kv : snapshots_) {
+    auto &meta = kv.second;
+    if (meta.blocks.find(block_num) != meta.blocks.end()) {
+      continue;
+    }
+    std::ofstream diff(meta.diff_path, std::ios::binary | std::ios::app);
+    if (!diff)
+      continue;
+    diff.write(reinterpret_cast<const char *>(&block_num), sizeof(block_num));
+    diff.write(data.data(), BLOCK_SIZE);
+    diff.flush();
+    meta.blocks.insert(block_num);
+  }
+  return true;
 }
 
 // Continued in next part...

@@ -99,6 +99,40 @@ private:
   // Helpers
   bool send_response(int socket, const protocol::Response &response);
   bool receive_message(int socket, protocol::Message &message);
+
+  // Paper helpers
+  struct PaperStatus {
+    std::string current_round;                 // e.g. R1/R2/REBUTTAL
+    protocol::BlindPolicy blind = protocol::BlindPolicy::SINGLE_BLIND;
+    protocol::Decision decision = protocol::Decision::PENDING;
+    protocol::LifecycleState state = protocol::LifecycleState::SUBMITTED;
+  };
+
+  PaperStatus load_paper_status(const std::string &paper_dir);
+  bool save_paper_status(const std::string &paper_dir,
+                         const PaperStatus &status);
+  bool ensure_round_dirs(const std::string &paper_dir,
+                         const std::string &round_str);
+  std::string round_dir(const std::string &paper_dir,
+                        const std::string &round_str);
+  bool is_reviewer_assigned(const std::string &paper_dir,
+                            const std::string &round_str,
+                            const std::string &username);
+  protocol::Role session_role(const std::string &session_id);
+
+  // Paper state helpers
+  struct PaperStatus {
+    protocol::ReviewRound round{protocol::ReviewRound::ROUND1};
+    protocol::LifecycleState state{protocol::LifecycleState::SUBMITTED};
+    protocol::Decision decision{protocol::Decision::PENDING};
+    protocol::BlindPolicy blind{protocol::BlindPolicy::SINGLE_BLIND};
+  };
+
+  bool load_paper_status(const std::string &paper_dir, PaperStatus &status);
+  bool save_paper_status(const std::string &paper_dir,
+                         const PaperStatus &status);
+  std::string get_round_dir(const std::string &paper_dir,
+                            const PaperStatus &status);
 };
 
 } // namespace server
