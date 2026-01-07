@@ -215,7 +215,7 @@ cd build
 6. **管理员检查/备份**
    - 登录：`admin / admin123`.
    - `2. View System Status`：查看 cache/journal stats 与 snapshot count。
-   - `3. Create Backup` 输入 `bk_2026_01`.  （此功能暂未实现）
+   - `3. Create Backup` 输入 `bk_2026_01`.  
    - `5. List Backups`、`6. Restore Backup bk_2026_01` 验证快照可回滚，`View System Status` 显示 `recovered=yes`。
    - （可选）`1. Create User` / `4. List Users` 管理账户。
    - Logout。

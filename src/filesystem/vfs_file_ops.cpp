@@ -424,11 +424,7 @@ int VirtualFileSystem::readdir(const std::string &path,
 
 // Backup operations (simplified implementation)
 bool VirtualFileSystem::create_backup(const std::string &backup_name) {
-  std::shared_lock<std::shared_mutex> lock(fs_mutex_);
-
-  if (!mounted_) {
-    return false;
-  }
+  // create_snapshot 内部会自行获取独占锁并检查 mounted 状态
   return create_snapshot(backup_name);
 }
 

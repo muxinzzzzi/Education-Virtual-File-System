@@ -20,20 +20,29 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  std::cout << "\nUsername: ";
-  std::string username;
-  std::getline(std::cin, username);
+  while (true) {
+    std::cout << "\nUsername: ";
+    std::string username;
+    std::getline(std::cin, username);
 
-  std::cout << "Password: ";
-  std::string password;
-  std::getline(std::cin, password);
+    std::cout << "Password: ";
+    std::string password;
+    std::getline(std::cin, password);
 
-  if (!client.login(username, password)) {
-    std::cerr << "Login failed\n";
-    return 1;
+    if (!client.login(username, password)) {
+      std::cerr << "Login failed\n";
+      continue;
+    }
+
+    client.run();
+
+    std::cout << "\nLogged out. 是否重新登录？(y/n): ";
+    std::string again;
+    std::getline(std::cin, again);
+    if (again != "y" && again != "Y") {
+      break;
+    }
   }
-
-  client.run();
 
   return 0;
 }
