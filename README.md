@@ -1,28 +1,43 @@
 # Peer Review System
 
-完整的科研审稿系统，使用 C++ 实现，包含自定义文件系统、Client-Server 架构和多角色权限管理。
+完整的科研审稿系统，使用 C++ 实现，包含自定义文件系统、Client-Server 架构和多角色权限管理。所有数据（论文、评审意见、角色信息、版本历史等）均存储在服务器端文件系统中。客户端提供命令行界面（CLI），通过网络连接服务器执行业务操作。
 
 ## 系统架构
 
-### 核心组件
-
-1. **虚拟文件系统 (VFS)**
-   -自定义文件系统，包含 superblock、inode、bitmap
+### 虚拟文件系统 (VFS)
+   - 自定义文件系统，包含 superblock、inode、bitmap 等结构
    - LRU 缓存，提升性能
    - 完整的文件与目录操作
    - 备份与恢复功能
 
-2. **网络服务器**
+### Server–Client 网络服务器
    - 基于 TCP/IP 的多线程服务器
    - 用户认证与授权
    - 四种用户角色：作者、审稿人、编辑、管理员
    - 完整的审稿业务逻辑
 
-3. **CLI 客户端**
-   - 交互式命令行界面
-   - 基于角色的功能菜单
-   - 文件上传下载
-   - 状态查看
+
+## 功能列表
+
+- **作者**: 上传论文、提交修订版本、查看审稿状态、下载审稿意见
+- **审稿人**: 下载论文、上传评审意见、查看审稿状态
+- **编辑**: 分配审稿人、查看审稿状态、作出最终决定
+- **管理员**: 用户管理、备份管理、系统状态查看
+
+- **审稿业务逻辑完善（已实现）**
+   - **多轮审稿轮次管理**：Round1/ Round2/ Rebuttal，提交修订会推进轮次，决策为 Major/Minor 时进入 Rebuttal。
+   - **审稿意见匿名化策略**：上传/分配时可选 `single` 或 `double`，作者侧下载评审/查看状态时自动隐藏审稿人身份。
+   - **最终决定状态细分**：Accept / Minor / Major / Reject，状态写入 `status.json` 并在查看状态时展示。
+
+- **自动化与智能化分配**
+    - **Conflict of Interest (COI) 检测**
+    - **基于关键词/领域的自动审稿人推荐**
+    - **负载均衡（避免某个审稿人任务过多）**
+
+- **高级文件系统特性（已实现基础版）**
+   - **日志型文件系统（Journaling）**：写前日志自动重放，`SYSTEM_STATUS` 展示重放统计。
+   - **Copy-on-Write 快照备份**：管理员 `Create Backup` 生成 COW 快照，`List Backups`/`Restore Backup` 使用差分文件回滚。
+   - **崩溃恢复与校验**：块级 checksum 保存到 `.checksum`，读时校验并告警。
 
 ## 编译与运行
 
@@ -33,7 +48,9 @@
 - **构建工具**: CMake 3.16+
 - **依赖库**: OpenSSL, Threads, Boost.Asio (如有使用), Qt 6 (GUI)
 
-### 快速编译
+### 指令
+
+#### 编译命令
 
 ```bash
 # 1. 创建并进入构建目录
@@ -45,8 +62,6 @@ cmake ..
 # 3. 编译所有组件
 make -j$(sysctl -n hw.ncpu || nproc)
 ```
-
-### 运行指令
 
 #### 1. 启动服务器 (必须首先运行)
 
@@ -67,9 +82,9 @@ cd build
 cd build
 ./src/client/review_client 127.0.0.1 8080
 ```
+
 #### 3. 启动 GUI 客户端
 未完成完，运行需要先下载 Qt 6
-
 ```bash
 ./run_gui.sh
 ```
@@ -77,12 +92,12 @@ cd build
 ---
 
 ## 详细测试流程 (CLI 示例)
-还有一些其他的功能也能测试
+
 
 ### 阶段 1: 作者提交论文
 1. 使用 **alice / password** 登录客户端。
 2. 选择 `1. Upload Paper`。
-3. 输入标题（如 `AI Research`）和本地文件路径。
+3. 输入标题（如 `AI Research`）和本地文件路径(eg:/Users/serena.c/Downloads/IBD.pdf)
 4. 系统返回 `201 Created` 及 `paper_id=P1`。
 5. 选择 `3. Logout`。
 
@@ -110,41 +125,10 @@ cd build
 3. 选择 `3. Create Backup` 输入备份名 `stable_v1`。
 4. 系统将在 VFS 内部创建磁盘快照。
 
-## 用户角色与功能
-
-### 默认测试账户
-
-- **管理员**: admin / admin123
-- **作者**: alice / password
-- **审稿人**: bob / password
-- **编辑**: charlie / password
-
-### 功能列表
-
-- **作者**: 上传论文、提交修订版本、查看审稿状态、下载审稿意见
-- **审稿人**: 下载论文、上传评审意见、查看审稿状态
-- **编辑**: 分配审稿人、查看审稿状态、作出最终决定
-- **管理员**: 用户管理、备份管理、系统状态查看
-
 ## 要添加的功能
 
 - **现有功能检查**
    - **可能有问题**: 三个查看审稿状态应该做区分, 比如审稿人的查看审稿状态应该是能看到分配给自己的文章，然后再输入ID查看。
-
-- **审稿业务逻辑完善（已实现）**
-   - **多轮审稿轮次管理**：Round1/ Round2/ Rebuttal，提交修订会推进轮次，决策为 Major/Minor 时进入 Rebuttal。
-   - **审稿意见匿名化策略**：上传/分配时可选 `single` 或 `double`，作者侧下载评审/查看状态时自动隐藏审稿人身份。
-   - **最终决定状态细分**：Accept / Minor / Major / Reject，状态写入 `status.json` 并在查看状态时展示。
-
-- **自动化与智能化分配**
-    - **Conflict of Interest (COI) 检测**
-    - **基于关键词/领域的自动审稿人推荐**
-    - **负载均衡（避免某个审稿人任务过多）**
-
-- **高级文件系统特性（已实现基础版）**
-   - **日志型文件系统（Journaling）**：写前日志自动重放，`SYSTEM_STATUS` 展示重放统计。
-   - **Copy-on-Write 快照备份**：管理员 `Create Backup` 生成 COW 快照，`List Backups`/`Restore Backup` 使用差分文件回滚。
-   - **崩溃恢复与校验**：块级 checksum 保存到 `.checksum`，读时校验并告警。
 
 - **GUI 客户端**
 
@@ -181,43 +165,50 @@ cd build
 - Logout `--` 注销 admin 会话
 
 ### 详细操作流程（含输入/输出） 
-!!!!!!!!!!!!!!!!!!!!
-路径是自己的本地路径，所有路径必须使用绝对路径重新写在终端中。
-！！！！！！！！！！
+还有一些其他的功能也能测试，如自动分配审稿人见!url[AUTO_ASSIGNMENT.MD]
+注意路径是自己的本地路径，所有路径必须使用绝对路径重新写在终端中
+
 1. **作者上传论文**
    - 登录：`alice / password`.
    - 菜单选择：`1. Upload Paper`.
-   - 标题：`AI Research`，本地文件路径：`"/home/cz/os homework/Education-Virtual-File-System/data/uploaded_paper/对账系统功能升级.docx"`.
+   - 标题：`AI Research`，本地文件路径：`"/Users/serena.c/Downloads/IBD.pdf"`.
    - 盲审策略：`double`.
    - 输出：`201 Created` / `paper_id=P1`；VFS 内 `/papers/P1/versions/v1.pdf`与`status.json` 都生成，记录 `current_round=R1` 与 `blind=double`.
    - Logout。
+
 2. **编辑分配审稿人**
    - 登录：`charlie / password`.
    - 菜单选择：`1. Assign Reviewer`.
    - 输入：`paper_id=P1`、`reviewer=bob`、`round=R1`、`blind=double`.
    - 输出：`Reviewer assigned`；`assignments.txt` 写入 `R1:bob`；`status.json` 变为 `UNDER_REVIEW`。
+
 3. **审稿人下载/提交评审**
    - 登录：`bob / password`.
-   - `1. Download Paper` 输入 `P1`。
-   - 输出：最新版本 PDF；若未分配或轮次不符返回 403。保存路径输入"/home/cz/os homework/Education-Virtual-File-System/data/downloaded_paper"
+   - `1. Download Paper` 输入 `P1`
+   - 输出:`最新版本 PDF`, 若未分配或轮次不符返回 403。
+   - 输入本地保存路径: `"/Users/serena.c/Downloads/Upload.pdf"`
    - `2. Submit Review` 输入 `P1`, 轮次默认 `R1`。
-   - 输出：`Review submitted`；VFS 路径 `/home/cz/os homework/Education-Virtual-File-System/data/review_file/bobP1.txt`。
-   - Logout。
+   - 输出：`Review submitted`；VFS 路径 `/Users/serena.c/Education-Virtual-File-System/data/review_file/bobP1.txt`。
+   - Logout
+
 4. **作者查看评审**
    - 登录：`alice / password`.
    - `3. View Paper Status` 输入 `P1`，看到轮次=R1，Blind=double，Decision=pending。
-   - `4. Download Reviews` 输入 `P1`，输出中 reviewer 名称为 `Reviewer_1`、`Reviewer_2` 等（双盲匿名）。 Logout。
+   - `4. Download Reviews` 输入 `P1`，输出中 reviewer 名称为 `Reviewer_1`、`Reviewer_2` 等（双盲匿名）。 
+   - Logout
+
 5. **编辑做决策**
    - 登录：`charlie / password`.
    - `2. Make Decision` 输入 `P1`, `major_revision`.
    - 输出：`Decision updated`，`status.json` 记录 `decision=major_revision`、`state=REBUTTAL`、`current_round=REBUTTAL`。  
    - 可再 `View Pending Papers` 或 `View Review Progress` 查看状态。
+
 6. **管理员检查/备份**
    - 登录：`admin / admin123`.
    - `2. View System Status`：查看 cache/journal stats 与 snapshot count。
-   - `3. Create Backup` 输入 `bk_2026_01`.  （此功能暂未实现）
+   - `3. Create Backup` 输入 `bk_2026_01`, 系统将在 VFS 内部创建磁盘快照。
    - `5. List Backups`、`6. Restore Backup bk_2026_01` 验证快照可回滚，`View System Status` 显示 `recovered=yes`。
-   - （可选）`1. Create User` / `4. List Users` 管理账户。
+   - `1. Create User` / `4. List Users` 管理账户。
    - Logout。
 
 这样从作者上传开始一路贯穿审稿人、编辑、管理员的操作，构成端到端测试脚本。

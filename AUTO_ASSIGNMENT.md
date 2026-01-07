@@ -1,10 +1,4 @@
-# 自动审稿人分配功能实现总结
-
-## 概述
-
-本文档总结了为 C++ 审稿系统实现的自动化与智能化审稿人分配功能。所有数据存储在服务器端 VFS 中，客户端仅负责 CLI 交互和网络请求。
-
----
+# 自动审稿人分配
 
 ## 实现的功能
 
@@ -12,10 +6,10 @@
 
 实现了以下 COI 规则：
 
-- ✅ **规则 1**: 禁止 reviewer == author
-- ✅ **规则 2**: 禁止相同 affiliation（机构）
-- ✅ **规则 3**: 支持作者指定 conflict_usernames 黑名单
-- ✅ **规则 4**: 支持 coauthors 关系检测（预留）
+- 禁止 reviewer == author
+- 禁止相同 affiliation（机构）
+- 支持作者指定 conflict_usernames 黑名单
+- 支持 coauthors 关系检测（预留）
 
 **实现位置**: `AssignmentService::check_coi()`
 
@@ -31,11 +25,8 @@
 relevance = 2.0 × |Field_paper ∩ Field_reviewer| + 1.0 × |Keyword_paper ∩ Keyword_reviewer|
 ```
 
-**特点**:
 - 字段匹配权重更高（2.0）
 - 关键词匹配权重次之（1.0）
-- 大小写不敏感
-- 自动 trim 空格
 
 **实现位置**: `AssignmentService::compute_relevance()`
 
@@ -76,7 +67,179 @@ final_score = relevance - λ × active_assignments
 
 ---
 
-## 新增文件
+## 快速测试流程
+
+编译，创建镜像，并创建测试文件
+```bash
+./demo_auto_assignment.sh
+```
+
+### 测试 1: 设置审稿人 Profile 
+
+```
+1. 登录: bob / password
+2. 选择: 4 (Set My Profile)
+3. 输入:
+   Fields: AI,Machine Learning
+   Keywords: deep learning,CNN
+   Affiliation: MIT
+4. 选择: 5 (View My Profile) 验证
+5. 选择: 6 (Logout)
+```
+- Profile 成功保存到 VFS `/users/bob/profile.txt`
+- 查看时能看到刚才输入的信息
+
+### 测试 2: 上传论文
+```
+1. 登录: alice / password
+2. 选择: 1 (Upload Paper)
+3. 输入:
+   Title: Deep Learning Research
+   File: /tmp/test_paper.pdf
+4. 记录 paper_id (例如 P1)
+5. 选择: 5 (Logout)
+```
+- Metadata 保存到 `/papers/P1/metadata.txt`
+**注意**: 如果 `/tmp/test_paper.pdf` 不存在，运行：
+```bash
+echo "Test paper content" > /tmp/test_paper.pdf
+```
+
+### 测试 3: COI 验证
+
+**前置条件**: 
+1. 先为 alice 设置 profile（需要先创建 alice 的 reviewer profile）
+2. alice 和 bob 都设置 affiliation 为 `MIT`
+```
+1. 登录: charlie / password (Editor)
+2. 选择: 1 (Assign Reviewer Manual)
+3. 输入:
+   Paper ID: P1
+   Reviewer: alice
+4. 预期结果: 
+   - 返回错误: `409 Conflict: COI detected: Reviewer is the paper author`
+   - 分配失败
+```
+
+### 测试 4: 自动推荐
+
+**目标**: 基于关键词和领域匹配推荐审稿人
+
+**前置条件**:
+1. 创建多个 reviewer 并设置不同的 profile:
+   - bob: fields=`AI,ML`, keywords=`deep learning,CNN`
+   - 创建新用户 david (Reviewer): fields=`NLP,AI`, keywords=`transformer,BERT`
+   - 创建新用户 eve (Reviewer): fields=`Robotics`, keywords=`control,planning`
+
+2. alice 上传论文 P2:
+   - fields: `AI,ML`
+   - keywords: `deep learning,image recognition`
+
+**步骤**:
+1. 使用 charlie（Editor）登录
+2. 选择 `5. Get Reviewer Recommendations`
+3. 输入:
+   - Paper ID: `P2`
+   - Top K: `5`
+
+**预期结果**:
+- 返回排序后的推荐列表
+- bob 应该排名最高（field 和 keyword 都匹配）
+- david 次之（field 部分匹配）
+- eve 排名最低（无匹配）
+- 每个 reviewer 显示:
+  - Relevance score
+  - Active load
+  - Final score
+  - COI 状态
+
+### 测试 5: 自动分配
+**目标**: 一键自动分配 N 个审稿人
+
+**前置条件**:
+1. 有足够的合格 reviewer（至少 3 个）
+2. alice 上传论文 P5
+```
+1. 继续使用 charlie 登录
+2. 选择: 6 (Auto Assign Reviewers)
+3. 输入:
+   Paper ID: P1
+   Number: 2
+4. 预期结果: Successfully assigned 2 reviewers
+```
+
+**验证分配**
+```
+1. 选择: 7 (Logout)
+2. 登录: bob / password
+3. 选择: 3 (View Review Status)
+4. 输入 Paper ID: P1
+5. 应该能看到这篇论文已分配给 bob
+```
+
+### 测试 6: 负载均衡
+
+**目标**: 验证负载高的审稿人排名下降
+
+**前置条件**:
+1. 手动给 bob 分配多篇论文（达到 active_load = 3）
+2. david 没有分配任何论文
+
+**步骤**:
+1. alice 上传新论文 P3（与 P2 类似的 fields/keywords）
+2. charlie 查看推荐: `Get Reviewer Recommendations` for P3
+
+**预期结果**:
+- david 的 final_score 可能超过 bob（因为 bob 的 load penalty）
+- 假设 lambda=0.5, bob 的 final_score = relevance - 0.5 * 3 = 4.0 - 1.5 = 2.5
+- david 的 final_score = 2.0 - 0 = 2.0
+- 如果 relevance 相近，load 低的会排前面
+
+### 测试 7: 负载阈值
+
+**目标**: 验证 MAX_ACTIVE 限制
+
+**前置条件**:
+1. 配置 max_active = 3（默认是 5）
+2. bob 已有 3 个 pending assignments
+
+**步骤**:
+1. charlie 尝试手动分配 bob 到新论文 P4
+
+**预期结果**:
+- 返回错误: `409 Conflict: Reviewer has too many active assignments (3/3)`
+
+---
+
+## 进阶测试
+
+### 创建更多测试用户
+
+```bash
+# 在客户端中
+1. 登录: admin / admin123
+2. 选择: 1 (Create User)
+3. 创建:
+   - david / password / reviewer
+   - eve / password / reviewer
+```
+
+### 设置不同的 Profile
+
+为每个 reviewer 设置不同的 fields/keywords，测试推荐排序：
+
+- bob: AI, ML → deep learning, CNN
+- david: NLP, AI → transformer, BERT
+- eve: Robotics → control, planning
+
+### 测试负载均衡
+
+1. 创建多篇论文 (P1, P2, P3)
+2. 手动分配 bob 到 P1, P2
+3. 推荐 P3 时，bob 的 final_score 会降低
+
+
+## 代码文件
 
 ### 服务端
 
@@ -384,20 +547,6 @@ AssignResult auto_assign(paper_id, num_reviewers) {
 
 ---
 
-## 测试场景
-
-详见 `test_auto_assignment.md`，包含：
-
-1. ✅ Profile 设置与查看
-2. ✅ COI 检测（作者、机构、黑名单）
-3. ✅ 自动推荐（相关性排序）
-4. ✅ 负载均衡（load penalty）
-5. ✅ 最大负载限制
-6. ✅ 自动分配（COI 过滤）
-7. ✅ 数据持久化（VFS）
-
----
-
 ## 性能考虑
 
 ### 当前实现
@@ -410,79 +559,3 @@ AssignResult auto_assign(paper_id, num_reviewers) {
 2. 建立倒排索引（field/keyword -> reviewers）
 3. 增量更新推荐结果
 4. 批量分配优化
-
----
-
-## 扩展方向
-
-### 已实现
-- ✅ 基础 COI 检测
-- ✅ 关键词匹配推荐
-- ✅ 负载均衡
-- ✅ 自动分配
-
-### 未来可扩展
-- [ ] 基于历史评审质量的权重调整
-- [ ] 多轮审稿的 reviewer 连续性
-- [ ] 审稿人专业度评分（基于论文引用、h-index 等）
-- [ ] 地理位置/时区考虑
-- [ ] 审稿人偏好设置（愿意审的领域）
-- [ ] 机器学习模型预测审稿质量
-
----
-
-## 编译与运行
-
-### 编译
-```bash
-cd /Users/muxin/Desktop/Education-Virtual-File-System
-mkdir -p build && cd build
-cmake ..
-make -j4
-```
-
-### 运行服务器
-```bash
-cd build
-./src/server/review_server 8080 test_assignment.img
-```
-
-### 运行客户端
-```bash
-cd build
-./src/client/review_client 127.0.0.1 8080
-```
-
-### 快速演示
-```bash
-./demo_auto_assignment.sh
-```
-
----
-
-## 总结
-
-本次实现完整地为审稿系统添加了自动化审稿人分配功能，包括：
-
-1. **COI 检测引擎**: 4 种规则，手动/自动分配均生效
-2. **智能推荐**: 基于领域和关键词匹配，可解释的评分
-3. **负载均衡**: 动态计算负载，避免过度分配
-4. **数据持久化**: 所有数据存储在 VFS，客户端无本地存储
-5. **完整的 CLI**: Editor 和 Reviewer 菜单集成新功能
-6. **权限控制**: 基于角色的访问控制
-
-所有功能均符合要求：
-- ✅ 数据只存服务器端 VFS
-- ✅ 客户端仅做 CLI 输入输出与网络请求
-- ✅ COI 检测硬规则
-- ✅ 自动推荐 Top-K
-- ✅ 负载均衡与 MAX_ACTIVE 限制
-- ✅ 可配置参数（lambda, max_active）
-- ✅ 清晰可扩展的代码结构
-
----
-
-**实现完成时间**: 2026-01-03
-**代码行数**: ~2000 行（新增+修改）
-**测试覆盖**: 10 个测试场景
-
