@@ -59,6 +59,10 @@ private:
                                            const std::string &session_id);
   protocol::Response handle_submit_review(const protocol::Message &msg,
                                           const std::string &session_id);
+  protocol::Response handle_save_review_draft(const protocol::Message &msg,
+                                              const std::string &session_id);
+  protocol::Response handle_get_review_draft(const protocol::Message &msg,
+                                             const std::string &session_id);
 
   // Editor commands
   protocol::Response handle_assign_reviewer(const protocol::Message &msg,
@@ -68,6 +72,8 @@ private:
 
   // Admin commands
   protocol::Response handle_create_user(const protocol::Message &msg,
+                                        const std::string &session_id);
+  protocol::Response handle_delete_user(const protocol::Message &msg,
                                         const std::string &session_id);
   protocol::Response handle_system_status(const std::string &session_id);
   protocol::Response handle_create_backup(const protocol::Message &msg,
@@ -85,6 +91,12 @@ private:
   protocol::Response handle_view_pending_papers(const std::string &session_id);
   protocol::Response handle_view_review_progress(const protocol::Message &msg,
                                                  const std::string &session_id);
+  
+  // List handlers
+  protocol::Response handle_list_my_papers(const std::string &session_id);
+  protocol::Response handle_list_assigned_papers(const std::string &session_id);
+  protocol::Response handle_list_all_papers(const protocol::Message &msg,
+                                            const std::string &session_id);
 
   // Assignment & Profile commands
   protocol::Response handle_set_reviewer_profile(const protocol::Message &msg,

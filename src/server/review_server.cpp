@@ -1,5 +1,7 @@
 #include "server/review_server.h"
+#include "server/review_data.h"
 #include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <iostream>
 #include <set>
@@ -233,12 +235,18 @@ protocol::Response ReviewServer::handle_command(const protocol::Message &msg,
     return handle_download_paper(msg, session_id);
   case protocol::Command::SUBMIT_REVIEW:
     return handle_submit_review(msg, session_id);
+  case protocol::Command::SAVE_REVIEW_DRAFT:
+    return handle_save_review_draft(msg, session_id);
+  case protocol::Command::GET_REVIEW_DRAFT:
+    return handle_get_review_draft(msg, session_id);
   case protocol::Command::ASSIGN_REVIEWER:
     return handle_assign_reviewer(msg, session_id);
   case protocol::Command::MAKE_DECISION:
     return handle_make_decision(msg, session_id);
   case protocol::Command::CREATE_USER:
     return handle_create_user(msg, session_id);
+  case protocol::Command::DELETE_USER:
+    return handle_delete_user(msg, session_id);
   case protocol::Command::SYSTEM_STATUS:
     return handle_system_status(session_id);
   case protocol::Command::CREATE_BACKUP:
@@ -265,6 +273,12 @@ protocol::Response ReviewServer::handle_command(const protocol::Message &msg,
     return handle_get_reviewer_recommendations(msg, session_id);
   case protocol::Command::AUTO_ASSIGN_REVIEWERS:
     return handle_auto_assign_reviewers(msg, session_id);
+  case protocol::Command::LIST_MY_PAPERS:
+    return handle_list_my_papers(session_id);
+  case protocol::Command::LIST_ASSIGNED_PAPERS:
+    return handle_list_assigned_papers(session_id);
+  case protocol::Command::LIST_ALL_PAPERS:
+    return handle_list_all_papers(msg, session_id);
   default:
     return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                               "Unknown command");
@@ -741,30 +755,241 @@ ReviewServer::handle_submit_review(const protocol::Message &msg,
   std::string username = auth_manager_->get_username(session_id);
   std::string paper_dir = "/papers/" + it_paper_id->second;
 
+  if (!vfs_->exists(paper_dir)) {
+    return protocol::Response(protocol::StatusCode::NOT_FOUND,
+                              "Paper not found");
+  }
+
   PaperStatus status = load_paper_status(paper_dir);
   std::string round = status.current_round;
-  auto it_round = msg.params.find("round");
-  if (it_round != msg.params.end()) {
-    round = it_round->second;
-  }
 
   if (!is_reviewer_assigned(paper_dir, round, username)) {
     return protocol::Response(protocol::StatusCode::FORBIDDEN,
                               "Not assigned to this paper/round");
   }
 
+  // 构建结构化审稿意见
+  StructuredReview review;
+  review.paper_id = it_paper_id->second;
+  review.reviewer = username;
+  review.round = round;
+  
+  // 从参数中提取各字段
+  auto it = msg.params.find("summary");
+  if (it != msg.params.end()) review.summary = it->second;
+  
+  it = msg.params.find("strengths");
+  if (it != msg.params.end()) review.strengths = it->second;
+  
+  it = msg.params.find("weaknesses");
+  if (it != msg.params.end()) review.weaknesses = it->second;
+  
+  it = msg.params.find("questions");
+  if (it != msg.params.end()) review.questions = it->second;
+  
+  it = msg.params.find("rating");
+  if (it != msg.params.end()) {
+    try {
+      review.rating = std::stoi(it->second);
+    } catch (...) {
+      review.rating = 0;
+    }
+  }
+  
+  it = msg.params.find("confidence");
+  if (it != msg.params.end()) {
+    try {
+      review.confidence = std::stoi(it->second);
+    } catch (...) {
+      review.confidence = 0;
+    }
+  }
+  
+  // 验证必填字段
+  if (review.summary.empty() || review.rating == 0) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "总评和评分为必填项");
+  }
+  
+  // 标记为已提交
+  review.status = "submitted";
+  review.last_modified = std::time(nullptr);
+  review.submitted_at = std::time(nullptr);
+  
+  // 保存为JSON文件
   std::string review_dir = round_dir(paper_dir, round) + "/reviews";
   ensure_round_dirs(paper_dir, round);
-  std::string review_file = review_dir + "/" + username + ".txt";
+  std::string review_file = review_dir + "/" + username + ".json";
+  
+  vfs_->create_file(review_file, 0644);
+  int fd = vfs_->open(review_file, O_WRONLY | O_TRUNC);
+  if (fd < 0) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                              "Failed to save review");
+  }
+  
+  std::string json_data = review.to_json();
+  ssize_t written = vfs_->write(fd, json_data.data(), json_data.size());
+  vfs_->close(fd);
+  
+  if (written != static_cast<ssize_t>(json_data.size())) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                              "Failed to write complete review data");
+  }
+  
+  std::cout << "[DEBUG] Review submitted: paper=" << review.paper_id 
+            << ", reviewer=" << review.reviewer 
+            << ", rating=" << review.rating << std::endl;
 
-  vfs_->create_file(review_file);
-  int fd = vfs_->open(review_file, O_WRONLY);
-  if (fd >= 0) {
-    vfs_->write(fd, msg.body.data(), msg.body.size());
-    vfs_->close(fd);
+  return protocol::Response(protocol::StatusCode::OK, "审稿意见已提交");
+}
+
+protocol::Response
+ReviewServer::handle_save_review_draft(const protocol::Message &msg,
+                                      const std::string &session_id) {
+  auto it_paper_id = msg.params.find("paper_id");
+  if (it_paper_id == msg.params.end()) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "Missing paper_id");
   }
 
-  return protocol::Response(protocol::StatusCode::OK, "Review submitted");
+  std::string username = auth_manager_->get_username(session_id);
+  std::string paper_dir = "/papers/" + it_paper_id->second;
+
+  if (!vfs_->exists(paper_dir)) {
+    return protocol::Response(protocol::StatusCode::NOT_FOUND,
+                              "Paper not found");
+  }
+
+  PaperStatus status = load_paper_status(paper_dir);
+  std::string round = status.current_round;
+
+  if (!is_reviewer_assigned(paper_dir, round, username)) {
+    return protocol::Response(protocol::StatusCode::FORBIDDEN,
+                              "Not assigned to this paper/round");
+  }
+
+  // 构建结构化审稿意见（草稿）
+  StructuredReview review;
+  review.paper_id = it_paper_id->second;
+  review.reviewer = username;
+  review.round = round;
+  
+  // 从参数中提取各字段（草稿可以不完整）
+  auto it = msg.params.find("summary");
+  if (it != msg.params.end()) review.summary = it->second;
+  
+  it = msg.params.find("strengths");
+  if (it != msg.params.end()) review.strengths = it->second;
+  
+  it = msg.params.find("weaknesses");
+  if (it != msg.params.end()) review.weaknesses = it->second;
+  
+  it = msg.params.find("questions");
+  if (it != msg.params.end()) review.questions = it->second;
+  
+  it = msg.params.find("rating");
+  if (it != msg.params.end()) {
+    try {
+      review.rating = std::stoi(it->second);
+    } catch (...) {
+      review.rating = 0;
+    }
+  }
+  
+  it = msg.params.find("confidence");
+  if (it != msg.params.end()) {
+    try {
+      review.confidence = std::stoi(it->second);
+    } catch (...) {
+      review.confidence = 0;
+    }
+  }
+  
+  // 标记为草稿
+  review.status = "draft";
+  review.last_modified = std::time(nullptr);
+  review.submitted_at = 0;
+  
+  // 保存为JSON文件
+  std::string review_dir = round_dir(paper_dir, round) + "/reviews";
+  ensure_round_dirs(paper_dir, round);
+  std::string review_file = review_dir + "/" + username + ".json";
+  
+  vfs_->create_file(review_file, 0644);
+  int fd = vfs_->open(review_file, O_WRONLY | O_TRUNC);
+  if (fd < 0) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                              "Failed to save draft");
+  }
+  
+  std::string json_data = review.to_json();
+  ssize_t written = vfs_->write(fd, json_data.data(), json_data.size());
+  vfs_->close(fd);
+  
+  if (written != static_cast<ssize_t>(json_data.size())) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                              "Failed to write complete draft data");
+  }
+  
+  std::cout << "[DEBUG] Review draft saved: paper=" << review.paper_id 
+            << ", reviewer=" << review.reviewer << std::endl;
+
+  return protocol::Response(protocol::StatusCode::OK, "草稿已保存");
+}
+
+protocol::Response
+ReviewServer::handle_get_review_draft(const protocol::Message &msg,
+                                     const std::string &session_id) {
+  auto it_paper_id = msg.params.find("paper_id");
+  if (it_paper_id == msg.params.end()) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "Missing paper_id");
+  }
+
+  std::string username = auth_manager_->get_username(session_id);
+  std::string paper_dir = "/papers/" + it_paper_id->second;
+
+  if (!vfs_->exists(paper_dir)) {
+    return protocol::Response(protocol::StatusCode::NOT_FOUND,
+                              "Paper not found");
+  }
+
+  PaperStatus status = load_paper_status(paper_dir);
+  std::string round = status.current_round;
+
+  if (!is_reviewer_assigned(paper_dir, round, username)) {
+    return protocol::Response(protocol::StatusCode::FORBIDDEN,
+                              "Not assigned to this paper/round");
+  }
+
+  // 尝试加载已保存的审稿意见
+  std::string review_dir = round_dir(paper_dir, round) + "/reviews";
+  std::string review_file = review_dir + "/" + username + ".json";
+  
+  if (!vfs_->exists(review_file)) {
+    return protocol::Response(protocol::StatusCode::OK, "No existing review");
+  }
+  
+  int fd = vfs_->open(review_file, O_RDONLY);
+  if (fd < 0) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                              "Failed to read review");
+  }
+  
+  char buffer[8192];
+  ssize_t bytes_read = vfs_->read(fd, buffer, sizeof(buffer) - 1);
+  vfs_->close(fd);
+  
+  if (bytes_read <= 0) {
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR,
+                              "Failed to read review data");
+  }
+  
+  protocol::Response resp(protocol::StatusCode::OK, "Found existing review");
+  resp.body.assign(buffer, buffer + bytes_read);
+  
+  return resp;
 }
 
 protocol::Response
@@ -785,6 +1010,20 @@ ReviewServer::handle_assign_reviewer(const protocol::Message &msg,
   if (!auth_manager_->user_exists(reviewer)) {
     return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                               "Reviewer user does not exist");
+  }
+  
+  // Check if trying to assign to admin
+  protocol::Role reviewer_role = auth_manager_->get_user_role_by_username(reviewer);
+  if (reviewer_role == protocol::Role::ADMIN) {
+    return protocol::Response(protocol::StatusCode::FORBIDDEN,
+                              "Cannot assign papers to admin users");
+  }
+  
+  // Check if user is actually a reviewer
+  if (reviewer_role != protocol::Role::REVIEWER) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "User '" + reviewer + "' is not a reviewer (role: " + 
+                              protocol::Protocol::role_to_string(reviewer_role) + ")");
   }
 
   std::string paper_dir = "/papers/" + paper_id;
@@ -926,6 +1165,10 @@ ReviewServer::handle_make_decision(const protocol::Message &msg,
   status.decision =
       protocol::Protocol::string_to_decision(it_decision->second);
 
+  std::cout << "[DEBUG] Making decision for " << it_paper_id->second 
+            << ", decision=" << it_decision->second 
+            << ", state before=" << protocol::Protocol::state_to_string(status.state) << std::endl;
+
   switch (status.decision) {
   case protocol::Decision::ACCEPT:
     status.state = protocol::LifecycleState::ACCEPTED;
@@ -943,7 +1186,14 @@ ReviewServer::handle_make_decision(const protocol::Message &msg,
     break;
   }
 
-  save_paper_status(paper_dir, status);
+  std::cout << "[DEBUG] State after decision=" << protocol::Protocol::state_to_string(status.state) << std::endl;
+
+  if (!save_paper_status(paper_dir, status)) {
+    std::cerr << "[ERROR] Failed to save paper status!" << std::endl;
+    return protocol::Response(protocol::StatusCode::INTERNAL_ERROR, "Failed to save decision");
+  }
+
+  std::cout << "[DEBUG] Decision saved successfully" << std::endl;
   return protocol::Response(protocol::StatusCode::OK, "Decision updated");
 }
 
@@ -967,6 +1217,32 @@ ReviewServer::handle_create_user(const protocol::Message &msg,
   } else {
     return protocol::Response(protocol::StatusCode::CONFLICT,
                               "User already exists");
+  }
+}
+
+protocol::Response
+ReviewServer::handle_delete_user(const protocol::Message &msg,
+                                 const std::string &session_id) {
+  auto it_user = msg.params.find("username");
+
+  if (it_user == msg.params.end()) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "Missing username");
+  }
+
+  std::string username = it_user->second;
+
+  // Prevent deletion of admin account
+  if (username == "admin") {
+    return protocol::Response(protocol::StatusCode::FORBIDDEN,
+                              "Cannot delete admin account");
+  }
+
+  if (auth_manager_->delete_user(username)) {
+    return protocol::Response(protocol::StatusCode::OK, "User deleted");
+  } else {
+    return protocol::Response(protocol::StatusCode::NOT_FOUND,
+                              "User not found");
   }
 }
 
@@ -1254,8 +1530,98 @@ ReviewServer::handle_view_pending_papers(const std::string &session_id) {
 protocol::Response
 ReviewServer::handle_view_review_progress(const protocol::Message &msg,
                                           const std::string &session_id) {
-  // Reuse view_paper_status which has progress details
-  return handle_view_paper_status(msg, session_id);
+  auto it_paper_id = msg.params.find("paper_id");
+  if (it_paper_id == msg.params.end()) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "Missing paper_id");
+  }
+
+  std::string paper_id = it_paper_id->second;
+  std::string paper_dir = "/papers/" + paper_id;
+
+  if (!vfs_->exists(paper_dir)) {
+    return protocol::Response(protocol::StatusCode::NOT_FOUND,
+                              "Paper not found");
+  }
+
+  PaperStatus status = load_paper_status(paper_dir);
+  std::string round = status.current_round;
+  
+  // 读取所有审稿意见
+  std::string reviews_dir = round_dir(paper_dir, round) + "/reviews";
+  std::vector<vfs::DirEntry> entries;
+  
+  std::ostringstream oss;
+  oss << "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  oss << "  📊 论文 " << paper_id << " 的审稿意见汇总\n";
+  oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
+  
+  int review_count = 0;
+  
+  if (vfs_->readdir(reviews_dir, entries) == 0) {
+    for (const auto &entry : entries) {
+      std::string filename(entry.name, entry.name_len);
+      if (filename[0] == '.' || filename.find(".json") == std::string::npos) continue;
+      
+      std::string review_file = reviews_dir + "/" + filename;
+      int fd = vfs_->open(review_file, O_RDONLY);
+      if (fd < 0) continue;
+      
+      char buffer[8192];
+      ssize_t bytes_read = vfs_->read(fd, buffer, sizeof(buffer) - 1);
+      vfs_->close(fd);
+      
+      if (bytes_read <= 0) continue;
+      
+      buffer[bytes_read] = '\0';
+      std::string json_str(buffer);
+      
+      // 解析JSON并生成可读格式
+      StructuredReview review = StructuredReview::from_json(json_str);
+      
+      review_count++;
+      oss << "[审稿人 " << review_count << "] " << review.reviewer << "\n";
+      oss << "评分: ";
+      switch (review.rating) {
+        case 1: oss << "1 - Strong Reject"; break;
+        case 2: oss << "2 - Weak Reject"; break;
+        case 3: oss << "3 - Borderline"; break;
+        case 4: oss << "4 - Weak Accept"; break;
+        case 5: oss << "5 - Strong Accept"; break;
+        default: oss << "0 - Not Rated"; break;
+      }
+      oss << " | 置信度: " << review.confidence << "/5\n";
+      oss << "状态: " << (review.status == "submitted" ? "✓ 已提交" : "⚠ 草稿") << "\n";
+      oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
+      
+      oss << "【总评】\n" << (review.summary.empty() ? "(未填写)" : review.summary) << "\n\n";
+      
+      if (!review.strengths.empty()) {
+        oss << "【优点】\n" << review.strengths << "\n\n";
+      }
+      
+      if (!review.weaknesses.empty()) {
+        oss << "【缺点】\n" << review.weaknesses << "\n\n";
+      }
+      
+      if (!review.questions.empty()) {
+        oss << "【问题/建议】\n" << review.questions << "\n\n";
+      }
+      
+      oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n";
+    }
+  }
+  
+  if (review_count == 0) {
+    oss << "  还没有审稿人提交审稿意见\n\n";
+  } else {
+    oss << "  共 " << review_count << " 条审稿意见\n\n";
+  }
+  
+  protocol::Response resp(protocol::StatusCode::OK, "Review progress");
+  std::string body = oss.str();
+  resp.body.assign(body.begin(), body.end());
+  return resp;
 }
 // ===== PaperStatus / Legacy helpers (KEEP) =====
 
@@ -1367,6 +1733,12 @@ bool ReviewServer::is_reviewer_assigned(const std::string &paper_dir,
       continue;
     std::string round = line.substr(0, colon);
     std::string reviewer = line.substr(colon + 1);
+    
+    // 去除行尾的空白字符（包括换行符）
+    while (!reviewer.empty() && (reviewer.back() == '\n' || reviewer.back() == '\r' || reviewer.back() == ' ' || reviewer.back() == '\t')) {
+      reviewer.pop_back();
+    }
+    
     if (round == round_str && reviewer == username) {
       return true;
     }
@@ -1550,11 +1922,41 @@ ReviewServer::handle_auto_assign_reviewers(const protocol::Message &msg,
     return protocol::Response(protocol::StatusCode::BAD_REQUEST,
                               "n must be between 1 and 10");
   }
+  
+  // Check if there are enough reviewers in the system
+  auto all_users = auth_manager_->list_users();
+  int reviewer_count = 0;
+  for (const auto &user : all_users) {
+    if (user.role == protocol::Role::REVIEWER) {
+      reviewer_count++;
+    }
+  }
+  
+  if (reviewer_count < n) {
+    return protocol::Response(protocol::StatusCode::BAD_REQUEST,
+                              "系统中审稿人数量不足（需要" + std::to_string(n) + 
+                              "个，实际" + std::to_string(reviewer_count) + "个）");
+  }
 
   auto result = assignment_service_->auto_assign(paper_id, n);
 
   if (!result.success) {
     return protocol::Response(protocol::StatusCode::CONFLICT, result.message);
+  }
+
+  // 同步写入 round:reviewer 格式到 assignments.txt，以便 is_reviewer_assigned 可以读取
+  std::string paper_dir = "/papers/" + paper_id;
+  PaperStatus status = load_paper_status(paper_dir);
+  std::string round = status.current_round;
+  
+  std::string assignments_path = assignments_file(paper_dir);
+  int fd_assign = vfs_->open(assignments_path, O_WRONLY | O_APPEND);
+  if (fd_assign >= 0) {
+    for (const auto &reviewer : result.assigned_reviewers) {
+      std::string assign_line = round + ":" + reviewer + "\n";
+      vfs_->write(fd_assign, assign_line.data(), assign_line.size());
+    }
+    vfs_->close(fd_assign);
   }
 
   std::ostringstream oss;
@@ -1636,6 +2038,309 @@ bool ReviewServer::receive_message(int socket, protocol::Message &message) {
   }
 
   return false;
+}
+
+// ===== List Papers Handlers =====
+
+protocol::Response
+ReviewServer::handle_list_my_papers(const std::string &session_id) {
+  std::string username = auth_manager_->get_username(session_id);
+  
+  std::ostringstream oss;
+  oss << "\n您的论文列表:\n";
+  oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  
+  std::vector<vfs::DirEntry> entries;
+  int count = 0;
+  int total_papers = 0;
+  
+  if (vfs_->readdir("/papers", entries) == 0) {
+    for (const auto &entry : entries) {
+      if (entry.name[0] == '.') continue;
+      
+      std::string paper_dir = "/papers/" + std::string(entry.name);
+      std::string meta_file = paper_dir + "/metadata.txt";  // 修复：应该是metadata.txt
+      
+      total_papers++;
+      
+      // 读取meta查找作者
+      int fd = vfs_->open(meta_file, 0);
+      if (fd < 0) continue;
+      
+      char buffer[4096];
+      ssize_t bytes_read = vfs_->read(fd, buffer, sizeof(buffer) - 1);
+      vfs_->close(fd);
+      
+      if (bytes_read > 0) {
+        buffer[bytes_read] = '\0';
+        std::string meta_content(buffer);
+        
+        // 提取作者
+        std::string paper_author = "";
+        size_t author_pos = meta_content.find("author=");
+        if (author_pos != std::string::npos) {
+          size_t end_pos = meta_content.find('\n', author_pos);
+          if (end_pos != std::string::npos) {
+            paper_author = meta_content.substr(author_pos + 7, end_pos - author_pos - 7);
+          }
+        }
+        
+        // 调试输出
+        std::cout << "[DEBUG] Paper: " << entry.name 
+                  << ", Author in meta: [" << paper_author 
+                  << "], Current user: [" << username << "]" << std::endl;
+        
+        // 检查是否是当前用户的论文
+        if (paper_author == username) {
+          count++;
+          
+          // 提取标题
+          std::string title = "Untitled";
+          size_t title_pos = meta_content.find("title=");
+          if (title_pos != std::string::npos) {
+            size_t end_pos = meta_content.find('\n', title_pos);
+            if (end_pos != std::string::npos) {
+              title = meta_content.substr(title_pos + 6, end_pos - title_pos - 6);
+              if (title.length() > 30) title = title.substr(0, 27) + "...";
+            }
+          }
+          
+          // 提取研究领域
+          std::string fields = "";
+          size_t fields_pos = meta_content.find("fields=");
+          if (fields_pos != std::string::npos) {
+            size_t end_pos = meta_content.find('\n', fields_pos);
+            if (end_pos != std::string::npos) {
+              fields = meta_content.substr(fields_pos + 7, end_pos - fields_pos - 7);
+              if (fields.length() > 20) fields = fields.substr(0, 17) + "...";
+            }
+          }
+          
+          // 读取状态
+          std::string status_file = paper_dir + "/status.json";
+          std::string status = "Submitted";
+          int status_fd = vfs_->open(status_file, 0);
+          if (status_fd >= 0) {
+            char status_buf[1024];
+            ssize_t status_bytes = vfs_->read(status_fd, status_buf, sizeof(status_buf) - 1);
+            vfs_->close(status_fd);
+            if (status_bytes > 0) {
+              status_buf[status_bytes] = '\0';
+              std::string status_content(status_buf);
+              if (status_content.find("UNDER_REVIEW") != std::string::npos) {
+                status = "Under Review";
+              } else if (status_content.find("ACCEPTED") != std::string::npos) {
+                status = "Accepted ✓";
+              } else if (status_content.find("REJECTED") != std::string::npos) {
+                status = "Rejected ✗";
+              } else if (status_content.find("MAJOR_REVISION") != std::string::npos) {
+                status = "Major Revision";
+              } else if (status_content.find("MINOR_REVISION") != std::string::npos) {
+                status = "Minor Revision";
+              }
+            }
+          }
+          
+          oss << "[" << count << "] " << entry.name << "\n";
+          oss << "    标题: " << title << "\n";
+          if (!fields.empty()) {
+            oss << "    领域: " << fields << "\n";
+          }
+          oss << "    状态: " << status << "\n\n";
+        }
+      }
+    }
+  }
+  
+  if (count == 0) {
+    oss << "您还没有提交任何论文\n";
+    oss << "(当前用户: " << username << ", 系统共有 " << total_papers << " 篇论文)\n";
+  } else {
+    oss << "共找到 " << count << " 篇您的论文\n";
+  }
+  
+  oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  
+  std::string body = oss.str();
+  protocol::Response resp(protocol::StatusCode::OK, "Papers list");
+  resp.body.assign(body.begin(), body.end());
+  return resp;
+}
+
+protocol::Response
+ReviewServer::handle_list_assigned_papers(const std::string &session_id) {
+  std::string username = auth_manager_->get_username(session_id);
+  
+  std::ostringstream oss;
+  oss << "\n待审论文列表:\n";
+  oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  
+  std::vector<vfs::DirEntry> entries;
+  int count = 0;
+  
+  if (vfs_->readdir("/papers", entries) == 0) {
+    for (const auto &entry : entries) {
+      if (entry.name[0] == '.') continue;
+      
+      std::string paper_dir = "/papers/" + std::string(entry.name);
+      std::string assignments_file = paper_dir + "/assignments.txt";
+      
+      // 检查是否分配给当前用户
+      int fd = vfs_->open(assignments_file, 0);
+      if (fd < 0) continue;
+      
+      char buffer[4096];
+      ssize_t bytes_read = vfs_->read(fd, buffer, sizeof(buffer) - 1);
+      vfs_->close(fd);
+      
+      if (bytes_read > 0) {
+        buffer[bytes_read] = '\0';
+        std::string assignments_content(buffer);
+        
+        if (assignments_content.find(username) != std::string::npos) {
+          count++;
+          
+          // 读取meta获取标题
+          std::string meta_file = paper_dir + "/metadata.txt";
+          std::string title = "Untitled";
+          int meta_fd = vfs_->open(meta_file, 0);
+          if (meta_fd >= 0) {
+            char meta_buf[4096];
+            ssize_t meta_bytes = vfs_->read(meta_fd, meta_buf, sizeof(meta_buf) - 1);
+            vfs_->close(meta_fd);
+            if (meta_bytes > 0) {
+              meta_buf[meta_bytes] = '\0';
+              std::string meta_content(meta_buf);
+              size_t title_pos = meta_content.find("title=");
+              if (title_pos != std::string::npos) {
+                size_t end_pos = meta_content.find('\n', title_pos);
+                title = meta_content.substr(title_pos + 6, end_pos - title_pos - 6);
+                if (title.length() > 30) title = title.substr(0, 27) + "...";
+              }
+            }
+          }
+          
+          oss << "[" << count << "] " << entry.name << "\n";
+          oss << "    标题: " << title << "\n\n";
+        }
+      }
+    }
+  }
+  
+  if (count == 0) {
+    oss << "没有分配给您的论文\n";
+  }
+  
+  oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  
+  std::string body = oss.str();
+  protocol::Response resp(protocol::StatusCode::OK, "Assigned papers");
+  resp.body.assign(body.begin(), body.end());
+  return resp;
+}
+
+protocol::Response
+ReviewServer::handle_list_all_papers(const protocol::Message &msg,
+                                     const std::string &session_id) {
+  std::ostringstream oss;
+  oss << "\n所有论文列表:\n";
+  oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  
+  std::vector<vfs::DirEntry> entries;
+  int count = 0;
+  
+  if (vfs_->readdir("/papers", entries) == 0) {
+    for (const auto &entry : entries) {
+      if (entry.name[0] == '.') continue;
+      
+      std::string paper_dir = "/papers/" + std::string(entry.name);
+      std::string meta_file = paper_dir + "/metadata.txt";  // 修复：应该是metadata.txt
+      
+      count++;
+      
+      // 读取meta
+      std::string title = "Untitled";
+      std::string author = "Unknown";
+      int fd = vfs_->open(meta_file, 0);
+      if (fd >= 0) {
+        char buffer[4096];
+        ssize_t bytes_read = vfs_->read(fd, buffer, sizeof(buffer) - 1);
+        vfs_->close(fd);
+        if (bytes_read > 0) {
+          buffer[bytes_read] = '\0';
+          std::string meta_content(buffer);
+          
+          size_t title_pos = meta_content.find("title=");
+          if (title_pos != std::string::npos) {
+            size_t end_pos = meta_content.find('\n', title_pos);
+            title = meta_content.substr(title_pos + 6, end_pos - title_pos - 6);
+            if (title.length() > 30) title = title.substr(0, 27) + "...";
+          }
+          
+          size_t author_pos = meta_content.find("author=");
+          if (author_pos != std::string::npos) {
+            size_t end_pos = meta_content.find('\n', author_pos);
+            author = meta_content.substr(author_pos + 7, end_pos - author_pos - 7);
+          }
+        }
+      }
+      
+      // 读取状态
+      std::string status_file = paper_dir + "/status.json";
+      std::string status = "Submitted";
+      int status_fd = vfs_->open(status_file, 0);
+      if (status_fd >= 0) {
+        char status_buf[1024];
+        ssize_t status_bytes = vfs_->read(status_fd, status_buf, sizeof(status_buf) - 1);
+        vfs_->close(status_fd);
+        if (status_bytes > 0) {
+          status_buf[status_bytes] = '\0';
+          std::string status_content(status_buf);
+          if (status_content.find("UNDER_REVIEW") != std::string::npos) {
+            status = "Under Review";
+          } else if (status_content.find("ACCEPTED") != std::string::npos) {
+            status = "Accepted ✓";
+          } else if (status_content.find("REJECTED") != std::string::npos) {
+            status = "Rejected ✗";
+          }
+        }
+      }
+      
+      // 读取分配情况
+      std::string assignments_file = paper_dir + "/assignments.txt";
+      std::string reviewers = "(未分配)";
+      int assign_fd = vfs_->open(assignments_file, 0);
+      if (assign_fd >= 0) {
+        char assign_buf[1024];
+        ssize_t assign_bytes = vfs_->read(assign_fd, assign_buf, sizeof(assign_buf) - 1);
+        vfs_->close(assign_fd);
+        if (assign_bytes > 0) {
+          assign_buf[assign_bytes] = '\0';
+          reviewers = std::string(assign_buf);
+          // 只显示审稿人名字，简化
+          if (reviewers.length() > 20) reviewers = reviewers.substr(0, 17) + "...";
+        }
+      }
+      
+      oss << "[" << count << "] " << entry.name << "\n";
+      oss << "    标题: " << title << "\n";
+      oss << "    作者: " << author << "\n";
+      oss << "    审稿人: " << reviewers << "\n";
+      oss << "    状态: " << status << "\n\n";
+    }
+  }
+  
+  if (count == 0) {
+    oss << "系统中还没有论文\n";
+  }
+  
+  oss << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  oss << "共 " << count << " 篇论文\n";
+  
+  std::string body = oss.str();
+  protocol::Response resp(protocol::StatusCode::OK, "All papers");
+  resp.body.assign(body.begin(), body.end());
+  return resp;
 }
 
 } // namespace server

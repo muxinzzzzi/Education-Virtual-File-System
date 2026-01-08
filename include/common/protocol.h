@@ -20,18 +20,23 @@ enum class Command {
   SUBMIT_REVISION,
   VIEW_PAPER_STATUS,
   DOWNLOAD_REVIEWS,
+  LIST_MY_PAPERS,
 
   // Reviewer commands
   VIEW_ASSIGNED_PAPERS,
   DOWNLOAD_PAPER,
   SUBMIT_REVIEW,
+  SAVE_REVIEW_DRAFT,
+  GET_REVIEW_DRAFT,
   VIEW_REVIEW_STATUS,
+  LIST_ASSIGNED_PAPERS,
 
   // Editor commands
   VIEW_PENDING_PAPERS,
   ASSIGN_REVIEWER,
   VIEW_REVIEW_PROGRESS,
   MAKE_DECISION,
+  LIST_ALL_PAPERS,
 
   // Admin commands
   CREATE_USER,
@@ -154,14 +159,22 @@ inline std::string Protocol::command_to_string(Command cmd) {
     return "VIEW_PAPER_STATUS";
   case Command::DOWNLOAD_REVIEWS:
     return "DOWNLOAD_REVIEWS";
+  case Command::LIST_MY_PAPERS:
+    return "LIST_MY_PAPERS";
   case Command::VIEW_ASSIGNED_PAPERS:
     return "VIEW_ASSIGNED_PAPERS";
   case Command::DOWNLOAD_PAPER:
     return "DOWNLOAD_PAPER";
   case Command::SUBMIT_REVIEW:
     return "SUBMIT_REVIEW";
+  case Command::SAVE_REVIEW_DRAFT:
+    return "SAVE_REVIEW_DRAFT";
+  case Command::GET_REVIEW_DRAFT:
+    return "GET_REVIEW_DRAFT";
   case Command::VIEW_REVIEW_STATUS:
     return "VIEW_REVIEW_STATUS";
+  case Command::LIST_ASSIGNED_PAPERS:
+    return "LIST_ASSIGNED_PAPERS";
   case Command::VIEW_PENDING_PAPERS:
     return "VIEW_PENDING_PAPERS";
   case Command::ASSIGN_REVIEWER:
@@ -170,6 +183,8 @@ inline std::string Protocol::command_to_string(Command cmd) {
     return "VIEW_REVIEW_PROGRESS";
   case Command::MAKE_DECISION:
     return "MAKE_DECISION";
+  case Command::LIST_ALL_PAPERS:
+    return "LIST_ALL_PAPERS";
   case Command::CREATE_USER:
     return "CREATE_USER";
   case Command::DELETE_USER:
@@ -205,14 +220,19 @@ inline Command Protocol::string_to_command(const std::string &str) {
       {"SUBMIT_REVISION", Command::SUBMIT_REVISION},
       {"VIEW_PAPER_STATUS", Command::VIEW_PAPER_STATUS},
       {"DOWNLOAD_REVIEWS", Command::DOWNLOAD_REVIEWS},
+      {"LIST_MY_PAPERS", Command::LIST_MY_PAPERS},
       {"VIEW_ASSIGNED_PAPERS", Command::VIEW_ASSIGNED_PAPERS},
       {"DOWNLOAD_PAPER", Command::DOWNLOAD_PAPER},
       {"SUBMIT_REVIEW", Command::SUBMIT_REVIEW},
+      {"SAVE_REVIEW_DRAFT", Command::SAVE_REVIEW_DRAFT},
+      {"GET_REVIEW_DRAFT", Command::GET_REVIEW_DRAFT},
       {"VIEW_REVIEW_STATUS", Command::VIEW_REVIEW_STATUS},
+      {"LIST_ASSIGNED_PAPERS", Command::LIST_ASSIGNED_PAPERS},
       {"VIEW_PENDING_PAPERS", Command::VIEW_PENDING_PAPERS},
       {"ASSIGN_REVIEWER", Command::ASSIGN_REVIEWER},
       {"VIEW_REVIEW_PROGRESS", Command::VIEW_REVIEW_PROGRESS},
       {"MAKE_DECISION", Command::MAKE_DECISION},
+      {"LIST_ALL_PAPERS", Command::LIST_ALL_PAPERS},
       {"CREATE_USER", Command::CREATE_USER},
       {"DELETE_USER", Command::DELETE_USER},
       {"LIST_USERS", Command::LIST_USERS},
@@ -297,13 +317,14 @@ inline std::string Protocol::decision_to_string(Decision decision) {
 }
 
 inline Decision Protocol::string_to_decision(const std::string &str) {
-  if (str == "accept")
+  // 支持数字输入
+  if (str == "1" || str == "accept")
     return Decision::ACCEPT;
-  if (str == "reject")
+  if (str == "2" || str == "reject")
     return Decision::REJECT;
-  if (str == "major_revision")
+  if (str == "3" || str == "major_revision")
     return Decision::MAJOR_REVISION;
-  if (str == "minor_revision")
+  if (str == "4" || str == "minor_revision")
     return Decision::MINOR_REVISION;
   return Decision::PENDING;
 }

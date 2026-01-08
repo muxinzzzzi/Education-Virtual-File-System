@@ -7,6 +7,25 @@
 
 namespace client {
 
+// 操作上下文（记忆最近操作的论文、审稿人等）
+struct OperationContext {
+  std::string last_paper_id;
+  std::string last_reviewer;
+  std::string last_file_path;
+  
+  void remember_paper(const std::string &paper_id) {
+    last_paper_id = paper_id;
+  }
+  
+  void remember_reviewer(const std::string &reviewer) {
+    last_reviewer = reviewer;
+  }
+  
+  void remember_file_path(const std::string &path) {
+    last_file_path = path;
+  }
+};
+
 class ReviewClient {
 public:
   ReviewClient();
@@ -30,6 +49,7 @@ private:
   std::string session_id_;
   protocol::Role current_role_;
   std::string username_;
+  std::shared_ptr<OperationContext> context_;
 
   // Command sending/receiving
   bool send_message(const protocol::Message &msg);
@@ -61,15 +81,18 @@ private:
 
   // Admin commands
   void create_user();
+  void delete_user();
   void view_system_status();
   void create_backup();
   void list_users();
   void list_backups();
   void restore_backup();
   
-  // Profile & Assignment commands
+  // Reviewer profile commands
   void set_reviewer_profile();
   void get_reviewer_profile();
+  
+  // Assignment commands
   void get_reviewer_recommendations();
   void auto_assign_reviewers();
 

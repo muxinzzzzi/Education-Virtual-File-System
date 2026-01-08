@@ -1,6 +1,7 @@
 #include "server/auth_manager.h"
 #include <ctime>
 #include <iomanip>
+#include <iostream>
 #include <openssl/sha.h>
 #include <random>
 #include <sstream>
@@ -158,10 +159,15 @@ bool AuthManager::authorize(const std::string &session_id,
 
   auto it = sessions_.find(session_id);
   if (it == sessions_.end()) {
+    std::cerr << "[DEBUG AUTH] Session not found!" << std::endl;
     return false;
   }
 
   protocol::Role role = it->second.role;
+  std::string cmd_str = protocol::Protocol::command_to_string(command);
+  std::string role_str = protocol::Protocol::role_to_string(role);
+  std::cerr << "[DEBUG AUTH] Checking: cmd=" << cmd_str 
+            << ", role=" << role_str << std::endl;
 
   // Define authorization rules
   switch (command) {
@@ -169,18 +175,23 @@ bool AuthManager::authorize(const std::string &session_id,
   case protocol::Command::SUBMIT_REVISION:
   case protocol::Command::VIEW_PAPER_STATUS:
   case protocol::Command::DOWNLOAD_REVIEWS:
+  case protocol::Command::LIST_MY_PAPERS:
     return role == protocol::Role::AUTHOR || role == protocol::Role::ADMIN;
 
   case protocol::Command::VIEW_ASSIGNED_PAPERS:
   case protocol::Command::DOWNLOAD_PAPER:
   case protocol::Command::SUBMIT_REVIEW:
+  case protocol::Command::SAVE_REVIEW_DRAFT:
+  case protocol::Command::GET_REVIEW_DRAFT:
   case protocol::Command::VIEW_REVIEW_STATUS:
+  case protocol::Command::LIST_ASSIGNED_PAPERS:
     return role == protocol::Role::REVIEWER || role == protocol::Role::ADMIN;
 
   case protocol::Command::VIEW_PENDING_PAPERS:
   case protocol::Command::ASSIGN_REVIEWER:
   case protocol::Command::VIEW_REVIEW_PROGRESS:
   case protocol::Command::MAKE_DECISION:
+  case protocol::Command::LIST_ALL_PAPERS:
     return role == protocol::Role::EDITOR || role == protocol::Role::ADMIN;
 
   case protocol::Command::CREATE_USER:
@@ -207,6 +218,7 @@ bool AuthManager::authorize(const std::string &session_id,
     return true; // Everyone can login/logout
 
   default:
+    std::cerr << "[DEBUG AUTH] Command not in authorization list, denied!" << std::endl;
     return false;
   }
 }
@@ -216,6 +228,17 @@ protocol::Role AuthManager::get_user_role(const std::string &session_id) {
 
   auto it = sessions_.find(session_id);
   if (it == sessions_.end()) {
+    return protocol::Role::UNKNOWN;
+  }
+
+  return it->second.role;
+}
+
+protocol::Role AuthManager::get_user_role_by_username(const std::string &username) const {
+  std::shared_lock<std::shared_mutex> lock(mutex_);
+
+  auto it = users_.find(username);
+  if (it == users_.end()) {
     return protocol::Role::UNKNOWN;
   }
 

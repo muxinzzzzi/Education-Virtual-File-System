@@ -28,6 +28,7 @@ add_subdirectory(src/filesystem)
 add_subdirectory(src/common)
 add_subdirectory(src/server)
 add_subdirectory(src/client)
+add_subdirectory(src/tools)
 
 if(BUILD_GUI)
     add_subdirectory(src/gui)

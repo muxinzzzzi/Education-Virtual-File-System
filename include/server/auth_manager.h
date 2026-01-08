@@ -54,6 +54,7 @@ public:
   // Authorization
   bool authorize(const std::string &session_id, protocol::Command command);
   protocol::Role get_user_role(const std::string &session_id);
+  protocol::Role get_user_role_by_username(const std::string &username) const;
   std::string get_username(const std::string &session_id);
 
   // Persistence

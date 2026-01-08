@@ -83,9 +83,13 @@ int32_t VirtualFileSystem::resolve_path_parent(const std::string &path,
                 << " during parent resolution.\n";
       return -1;
     }
+    std::cerr << "[VFS DEBUG] resolve_path_parent: Found '" << component 
+              << "' at inode " << next_inode << "\n";
     current_inode = next_inode;
   }
 
+  std::cerr << "[VFS DEBUG] resolve_path_parent: Final parent inode is " 
+            << current_inode << "\n";
   return current_inode;
 }
 
@@ -299,6 +303,10 @@ int VirtualFileSystem::create_file(const std::string &path, uint32_t mode) {
     return -5;
   }
 
+  std::cerr << "[VFS DEBUG] create_file: Created file '" << path 
+            << "' with inode " << inode_num << " in parent inode " 
+            << parent_inode << "\n";
+
   return 0;
 }
 
@@ -343,6 +351,10 @@ int VirtualFileSystem::mkdir(const std::string &path, uint32_t mode) {
     free_inode(inode_num);
     return -5;
   }
+
+  std::cerr << "[VFS DEBUG] mkdir: Created directory '" << path 
+            << "' with inode " << inode_num << " in parent inode " 
+            << parent_inode << "\n";
 
   return 0;
 }

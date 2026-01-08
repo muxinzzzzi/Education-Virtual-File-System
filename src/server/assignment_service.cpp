@@ -471,9 +471,8 @@ AssignmentService::recommend_reviewers(const std::string &paper_id, int top_k) {
   auto all_users = auth_manager_->list_users();
 
   for (const auto &user : all_users) {
-    // Only consider reviewers
-    if (user.role != protocol::Role::REVIEWER &&
-        user.role != protocol::Role::ADMIN) {
+    // Only consider reviewers (exclude admin)
+    if (user.role != protocol::Role::REVIEWER) {
       continue;
     }
 
